@@ -15,7 +15,7 @@ func Init() map[string]string {
 	_ = godotenv.Load()
 
 	required := []string{
-		constants.ServerEnv,
+		"SERVER_ENV",
 		constants.ServerPort,
 
 		constants.DbDialeg,
