@@ -13,6 +13,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o siaga-api
 
 FROM alpine:3.20
 WORKDIR /app
+
+ENV TZ=Asia/Jakarta
+
 RUN apk add --no-cache wget ca-certificates
 COPY --from=builder /app/siaga-api .
 EXPOSE 8686
