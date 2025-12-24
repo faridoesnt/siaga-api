@@ -50,7 +50,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "."
-          target: "/opt/siaga/siaga-api"
+          target: "/home/farid/siaga/siaga-api"
           strip_components: 1
 
       - name: Deploy & switch API
@@ -60,5 +60,5 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /opt/siaga/infra
+            cd /home/farid/siaga/infra
             ./deploy-and-switch-service.sh siaga-api
