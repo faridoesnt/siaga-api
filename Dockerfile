@@ -1,7 +1,13 @@
 FROM golang:1.23-alpine AS builder
+
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+
+# Download dengan retry
+RUN go mod download || \
+    (sleep 5 && go mod download) || \
+    (sleep 10 && go mod download)
+
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o siaga-api
 
