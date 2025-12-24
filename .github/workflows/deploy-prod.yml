@@ -28,8 +28,8 @@ jobs:
           DB_HOSTREADER=${{ vars.DB_HOSTREADER }}
           DB_PORT=${{ vars.DB_PORT }}
           DB_NAME=${{ secrets.DB_NAME }}
-          USERNAME=${{ secrets.DB_USER }}
-          PASSWORD=${{ secrets.DB_PASSWORD }}
+          USERNAME=${{ secrets.USERNAME }}
+          PASSWORD=${{ secrets.PASSWORD }}
 
           JWT_SECRET=${{ secrets.JWT_SECRET }}
           REFRESH_SECRET=${{ secrets.REFRESH_SECRET }}
