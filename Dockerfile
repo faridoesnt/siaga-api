@@ -18,6 +18,7 @@ ENV TZ=Asia/Jakarta
 
 RUN apk add --no-cache wget ca-certificates
 COPY --from=builder /app/siaga-api .
+COPY --from=builder /app/migrations ./migrations
 EXPOSE 8686
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
