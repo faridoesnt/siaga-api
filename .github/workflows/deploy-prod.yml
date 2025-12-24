@@ -1,0 +1,64 @@
+name: Deploy SIAGA API (Prod)
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    environment: prod
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout source code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2️⃣ Generate .env.runtime (DI RUNNER)
+      - name: Generate runtime env
+        run: |
+          cat <<EOF > .env.runtime
+          SERVER_ENV="${{ vars.SERVER_ENV }}"
+          SERVER_PORT="${{ vars.SERVER_PORT }}"
+
+          DB_DIALEG=${{ vars.DB_DIALEG }}
+          DB_HOSTWRITER=${{ vars.DB_HOSTWRITER }}
+          DB_HOSTREADER=${{ vars.DB_HOSTREADER }}
+          DB_PORT=${{ vars.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          USERNAME=${{ secrets.DB_USER }}
+          PASSWORD=${{ secrets.DB_PASSWORD }}
+
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          REFRESH_SECRET=${{ secrets.REFRESH_SECRET }}
+          JWT_TTL=${{ vars.JWT_TTL }}
+          REFRESH_TTL=${{ vars.REFRESH_TTL }}
+
+          FACE_SERVICE_URL=${{ vars.FACE_SERVICE_URL }}
+          FACE_VERIFY_BYPASS=${{ vars.FACE_VERIFY_BYPASS }}
+
+          RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+          RESEND_WEBHOOK_SECRET=${{ secrets.RESEND_WEBHOOK_SECRET }}
+          EOF
+
+      - name: Upload source
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "."
+          target: "/opt/siaga/siaga-api"
+          strip_components: 1
+
+      - name: Deploy & switch API
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/siaga/infra
+            ./deploy-and-switch-service.sh siaga-api
