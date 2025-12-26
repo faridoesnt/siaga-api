@@ -50,3 +50,21 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*entities.U
 	}
 	return &user, nil
 }
+
+// FindByEmailAndRole returns user by email + role or nil if not found.
+func (r *Repository) FindByEmailAndRole(ctx context.Context, email, role string) (*entities.User, error) {
+	var user entities.User
+	err := r.app.Ds.ReaderDB.GetContext(ctx, &user, `
+		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
+		FROM users
+		WHERE email = ? AND role = ?
+		LIMIT 1
+	`, email, role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
+}

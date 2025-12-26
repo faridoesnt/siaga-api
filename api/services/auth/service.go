@@ -39,7 +39,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (*contracts
 		return nil, responses.BadRequest(errors.New("email and password are required"))
 	}
 
-	user, err := s.repo.FindByEmail(ctx, email)
+	// Satpam login: cari user SATPAM dengan email ini.
+	user, err := s.repo.FindByEmailAndRole(ctx, email, "SATPAM")
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
@@ -90,15 +91,13 @@ func (s *Service) LoginAdmin(ctx context.Context, email, password string) (*cont
 		return nil, responses.BadRequest(errors.New("email and password are required"))
 	}
 
-	user, err := s.repo.FindByEmail(ctx, email)
+	// Admin login: cari user ADMIN dengan email ini.
+	user, err := s.repo.FindByEmailAndRole(ctx, email, "ADMIN")
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
 	if user == nil {
 		return nil, responses.UnAuthorized(errors.New("invalid email or password"))
-	}
-	if user.Role != "ADMIN" {
-		return nil, responses.Forbidden(errors.New("user is not admin"))
 	}
 	if !user.Active {
 		return nil, responses.Forbidden(errors.New("user is inactive"))

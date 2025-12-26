@@ -8,6 +8,7 @@ import (
 
 type AuthRepository interface {
 	FindByEmail(ctx context.Context, email string) (*entities.User, error)
+	FindByEmailAndRole(ctx context.Context, email, role string) (*entities.User, error)
 }
 
 type AuthLoginResult struct {
