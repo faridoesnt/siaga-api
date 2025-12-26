@@ -108,6 +108,11 @@ func (s *Service) LoginAdmin(ctx context.Context, email, password string) (*cont
 		return nil, responses.UnAuthorized(errors.New("invalid email or password"))
 	}
 
+	// Ensure admin has default permissions on first login.
+	if err := s.ensureDefaultAdminPermissions(ctx, user.ID); err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
 	ttlSeconds := parseInt(s.app.Config[constants.JWT_TTL], constants.DefaultJwtLifetime)
 	expiration := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
 
@@ -141,4 +146,24 @@ func parseInt(raw string, fallback int) int {
 		return v
 	}
 	return fallback
+}
+
+func (s *Service) ensureDefaultAdminPermissions(ctx context.Context, userID int64) error {
+	var count int
+	if err := s.app.Ds.ReaderDB.GetContext(ctx, &count, `
+		SELECT COUNT(1) FROM user_permissions WHERE user_id = ?
+	`, userID); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	// Assign all existing permissions to this admin by default.
+	if _, err := s.app.Ds.WriterDB.ExecContext(ctx, `
+		INSERT INTO user_permissions (user_id, permission_code)
+		SELECT ?, code FROM permissions
+	`, userID); err != nil {
+		return err
+	}
+	return nil
 }

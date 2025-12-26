@@ -13,10 +13,10 @@ import (
 
 type Repository interface {
 	// Users / Satpam
-	CreateSatpam(ctx context.Context, email, passwordHash, name string, workStartDate *time.Time) (*entities.User, error)
-	ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.User, error)
+	CreateSatpam(ctx context.Context, payload *entities.SatpamUpsertPayload, passwordHash string) (*entities.SatpamWithProfile, error)
+	ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.SatpamWithProfile, error)
 	SetSatpamActive(ctx context.Context, userID int64, active bool) error
-	UpdateSatpam(ctx context.Context, userID int64, email, name string, workStartDate *time.Time) (*entities.User, error)
+	UpdateSatpam(ctx context.Context, userID int64, payload *entities.SatpamUpsertPayload) (*entities.SatpamWithProfile, error)
 	DeleteSatpam(ctx context.Context, userID int64) error
 
 	// Attendance spots
@@ -31,6 +31,8 @@ type Repository interface {
 	ListShifts(ctx context.Context, limit, offset int) ([]*entities.Shift, error)
 	AssignUserShift(ctx context.Context, userID, shiftID int64, shiftDate time.Time) (*entities.UserShift, error)
 	HasAttendanceForDate(ctx context.Context, userID int64, date time.Time) (bool, error)
+	UpsertUserShift(ctx context.Context, userID, shiftID int64, shiftDate time.Time) (inserted bool, updated bool, err error)
+	GetShiftIDsByNames(ctx context.Context, names []string) (map[string]int64, error)
 	UpdateShift(ctx context.Context, id int64, name string, startTime, endTime time.Time, lateTolerance int) (*entities.Shift, error)
 	DeleteShift(ctx context.Context, id int64) error
 
@@ -58,6 +60,20 @@ type Repository interface {
 	GetSatpamByID(ctx context.Context, userID int64) (*entities.User, error)
 	ReplaceFaceEmbeddings(ctx context.Context, userID int64, embeddings []string, model string) error
 	GetFaceEmbeddingSummary(ctx context.Context, userID int64) (*entities.FaceEmbeddingSummary, error)
+
+	// Dashboard
+	GetDashboardSummary(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardSummary, error)
+	GetDashboardTrend(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardTrendRow, error)
+	GetDashboardDiscipline(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardDisciplineRow, error)
+	GetDashboardRiskEmployees(ctx context.Context, startDate, endDate time.Time, limit int) ([]*entities.AdminDashboardRiskRow, error)
+	GetDashboardConsistency(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardConsistencyRow, error)
+	GetDashboardAudit(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardAuditRow, error)
+
+	// RBAC
+	GetUserPermissions(ctx context.Context, userID int64) ([]string, error)
+	ListPermissions(ctx context.Context) ([]*entities.Permission, error)
+	ListAdmins(ctx context.Context, limit, offset int) ([]*entities.User, error)
+	GetAdminByID(ctx context.Context, id int64) (*entities.User, error)
 }
 
 type repository struct {
@@ -70,46 +86,113 @@ func NewRepository(app *contracts.App) Repository {
 
 // Users / Satpam
 
-func (r *repository) CreateSatpam(ctx context.Context, email, passwordHash, name string, workStartDate *time.Time) (*entities.User, error) {
-	res, err := r.app.Ds.WriterDB.ExecContext(ctx, `
-		INSERT INTO users (name, email, password_hash, role, work_start_date, active)
-		VALUES (?, ?, ?, 'SATPAM', ?, 1)
-	`, name, email, passwordHash, workStartDate)
+func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamUpsertPayload, passwordHash string) (*entities.SatpamWithProfile, error) {
+	tx, err := r.app.Ds.WriterDB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	id, err := res.LastInsertId()
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO users (name, email, password_hash, role, work_start_date, active)
+		VALUES (?, ?, ?, 'SATPAM', ?, ?)
+	`, payload.Name, payload.Email, passwordHash, payload.WorkStartDate, payload.Active)
+	if err != nil {
+		return nil, err
+	}
+	userID, err := res.LastInsertId()
 	if err != nil {
 		return nil, err
 	}
 
-	var user entities.User
-	if err := r.app.Ds.ReaderDB.GetContext(ctx, &user, `
-		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
-		FROM users
-		WHERE id = ?
-	`, id); err != nil {
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO satpam_profiles (
+			user_id, jabatan, jenis_kelamin, tanggal_lahir, tempat_lahir, no_ktp,
+			alamat, no_telepon, agama, status_pernikahan, kebangsaan, work_start_date
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, userID, payload.Jabatan, payload.JenisKelamin, payload.TanggalLahir, payload.TempatLahir, payload.NoKTP,
+		payload.Alamat, payload.NoTelepon, payload.Agama, payload.StatusPernikahan, payload.Kebangsaan, payload.WorkStartDate)
+	if err != nil {
 		return nil, err
 	}
-	return &user, nil
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var row struct {
+		ID              int64      `db:"id"`
+		Name            string     `db:"name"`
+		Email           string     `db:"email"`
+		Role            string     `db:"role"`
+		Active          bool       `db:"active"`
+		Jabatan         string     `db:"jabatan"`
+		JenisKelamin    string     `db:"jenis_kelamin"`
+		TanggalLahir    *time.Time `db:"tanggal_lahir"`
+		TempatLahir     *string    `db:"tempat_lahir"`
+		NoKTP           *string    `db:"no_ktp"`
+		Alamat          string     `db:"alamat"`
+		NoTelepon       string     `db:"no_telepon"`
+		Agama           *string    `db:"agama"`
+		StatusPernikahan *string   `db:"status_pernikahan"`
+		Kebangsaan      *string    `db:"kebangsaan"`
+		WorkStartDate   time.Time  `db:"work_start_date"`
+	}
+
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			u.id, u.name, u.email, u.role, u.active,
+			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
+			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
+			p.work_start_date
+		FROM users u
+		INNER JOIN satpam_profiles p ON p.user_id = u.id
+		WHERE u.id = ?
+	`, userID); err != nil {
+		return nil, err
+	}
+
+	return &entities.SatpamWithProfile{
+		ID:               row.ID,
+		Name:             row.Name,
+		Email:            row.Email,
+		Role:             row.Role,
+		Active:           row.Active,
+		Jabatan:          row.Jabatan,
+		JenisKelamin:     row.JenisKelamin,
+		TanggalLahir:     row.TanggalLahir,
+		TempatLahir:      row.TempatLahir,
+		NoKTP:            row.NoKTP,
+		Alamat:           row.Alamat,
+		NoTelepon:        row.NoTelepon,
+		Agama:            row.Agama,
+		StatusPernikahan: row.StatusPernikahan,
+		Kebangsaan:       row.Kebangsaan,
+		WorkStartDate:    row.WorkStartDate,
+	}, nil
 }
 
-func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.User, error) {
+func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.SatpamWithProfile, error) {
 	args := []interface{}{"SATPAM"}
 	query := `
-		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
-		FROM users
-		WHERE role = ?
+		SELECT
+			u.id, u.name, u.email, u.role, u.active,
+			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
+			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
+			p.work_start_date
+		FROM users u
+		INNER JOIN satpam_profiles p ON p.user_id = u.id
+		WHERE u.role = ?
 	`
 	if active != nil {
-		query += " AND active = ?"
+		query += " AND u.active = ?"
 		if *active {
 			args = append(args, 1)
 		} else {
 			args = append(args, 0)
 		}
 	}
-	query += " ORDER BY name ASC"
+	query += " ORDER BY u.name ASC"
 
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -120,11 +203,84 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 		}
 	}
 
+	var rows []struct {
+		ID              int64      `db:"id"`
+		Name            string     `db:"name"`
+		Email           string     `db:"email"`
+		Role            string     `db:"role"`
+		Active          bool       `db:"active"`
+		Jabatan         string     `db:"jabatan"`
+		JenisKelamin    string     `db:"jenis_kelamin"`
+		TanggalLahir    *time.Time `db:"tanggal_lahir"`
+		TempatLahir     *string    `db:"tempat_lahir"`
+		NoKTP           *string    `db:"no_ktp"`
+		Alamat          string     `db:"alamat"`
+		NoTelepon       string     `db:"no_telepon"`
+		Agama           *string    `db:"agama"`
+		StatusPernikahan *string   `db:"status_pernikahan"`
+		Kebangsaan      *string    `db:"kebangsaan"`
+		WorkStartDate   time.Time  `db:"work_start_date"`
+	}
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
+		return nil, err
+	}
+	result := make([]*entities.SatpamWithProfile, 0, len(rows))
+	for _, rrow := range rows {
+		result = append(result, &entities.SatpamWithProfile{
+			ID:               rrow.ID,
+			Name:             rrow.Name,
+			Email:            rrow.Email,
+			Role:             rrow.Role,
+			Active:           rrow.Active,
+			Jabatan:          rrow.Jabatan,
+			JenisKelamin:     rrow.JenisKelamin,
+			TanggalLahir:     rrow.TanggalLahir,
+			TempatLahir:      rrow.TempatLahir,
+			NoKTP:            rrow.NoKTP,
+			Alamat:           rrow.Alamat,
+			NoTelepon:        rrow.NoTelepon,
+			Agama:            rrow.Agama,
+			StatusPernikahan: rrow.StatusPernikahan,
+			Kebangsaan:       rrow.Kebangsaan,
+			WorkStartDate:    rrow.WorkStartDate,
+		})
+	}
+	return result, nil
+}
+
+func (r *repository) ListAdmins(ctx context.Context, limit, offset int) ([]*entities.User, error) {
+	args := []interface{}{"ADMIN"}
+	query := `
+		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
+		FROM users
+		WHERE role = ?
+		ORDER BY name ASC
+	`
+	if limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, limit, offset)
+	}
+
 	var users []*entities.User
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &users, query, args...); err != nil {
 		return nil, err
 	}
 	return users, nil
+}
+
+func (r *repository) GetAdminByID(ctx context.Context, id int64) (*entities.User, error) {
+	var user entities.User
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &user, `
+		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
+		FROM users
+		WHERE id = ? AND role = 'ADMIN'
+	`, id); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
 }
 
 func (r *repository) SetSatpamActive(ctx context.Context, userID int64, active bool) error {
@@ -136,28 +292,88 @@ func (r *repository) SetSatpamActive(ctx context.Context, userID int64, active b
 	return err
 }
 
-func (r *repository) UpdateSatpam(ctx context.Context, userID int64, email, name string, workStartDate *time.Time) (*entities.User, error) {
-	_, err := r.app.Ds.WriterDB.ExecContext(ctx, `
-		UPDATE users
-		SET name = ?, email = ?, work_start_date = ?, updated_at = NOW()
-		WHERE id = ? AND role = 'SATPAM'
-	`, name, email, workStartDate, userID)
+func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *entities.SatpamUpsertPayload) (*entities.SatpamWithProfile, error) {
+	tx, err := r.app.Ds.WriterDB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = tx.Rollback() }()
 
-	var user entities.User
-	if err := r.app.Ds.ReaderDB.GetContext(ctx, &user, `
-		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
-		FROM users
-		WHERE id = ?
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users
+		SET name = ?, email = ?, work_start_date = ?, active = ?, updated_at = NOW()
+		WHERE id = ? AND role = 'SATPAM'
+	`, payload.Name, payload.Email, payload.WorkStartDate, payload.Active, userID); err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE satpam_profiles
+		SET jabatan = ?, jenis_kelamin = ?, tanggal_lahir = ?, tempat_lahir = ?, no_ktp = ?,
+		    alamat = ?, no_telepon = ?, agama = ?, status_pernikahan = ?, kebangsaan = ?, work_start_date = ?, updated_at = NOW()
+		WHERE user_id = ?
+	`, payload.Jabatan, payload.JenisKelamin, payload.TanggalLahir, payload.TempatLahir, payload.NoKTP,
+		payload.Alamat, payload.NoTelepon, payload.Agama, payload.StatusPernikahan, payload.Kebangsaan, payload.WorkStartDate, userID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var row struct {
+		ID              int64      `db:"id"`
+		Name            string     `db:"name"`
+		Email           string     `db:"email"`
+		Role            string     `db:"role"`
+		Active          bool       `db:"active"`
+		Jabatan         string     `db:"jabatan"`
+		JenisKelamin    string     `db:"jenis_kelamin"`
+		TanggalLahir    *time.Time `db:"tanggal_lahir"`
+		TempatLahir     *string    `db:"tempat_lahir"`
+		NoKTP           *string    `db:"no_ktp"`
+		Alamat          string     `db:"alamat"`
+		NoTelepon       string     `db:"no_telepon"`
+		Agama           *string    `db:"agama"`
+		StatusPernikahan *string   `db:"status_pernikahan"`
+		Kebangsaan      *string    `db:"kebangsaan"`
+		WorkStartDate   time.Time  `db:"work_start_date"`
+	}
+
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			u.id, u.name, u.email, u.role, u.active,
+			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
+			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
+			p.work_start_date
+		FROM users u
+		INNER JOIN satpam_profiles p ON p.user_id = u.id
+		WHERE u.id = ? AND u.role = 'SATPAM'
 	`, userID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return &user, nil
+
+	return &entities.SatpamWithProfile{
+		ID:               row.ID,
+		Name:             row.Name,
+		Email:            row.Email,
+		Role:             row.Role,
+		Active:           row.Active,
+		Jabatan:          row.Jabatan,
+		JenisKelamin:     row.JenisKelamin,
+		TanggalLahir:     row.TanggalLahir,
+		TempatLahir:      row.TempatLahir,
+		NoKTP:            row.NoKTP,
+		Alamat:           row.Alamat,
+		NoTelepon:        row.NoTelepon,
+		Agama:            row.Agama,
+		StatusPernikahan: row.StatusPernikahan,
+		Kebangsaan:       row.Kebangsaan,
+		WorkStartDate:    row.WorkStartDate,
+	}, nil
 }
 
 func (r *repository) DeleteSatpam(ctx context.Context, userID int64) error {
@@ -329,6 +545,35 @@ func (r *repository) ListShifts(ctx context.Context, limit, offset int) ([]*enti
 	return shifts, nil
 }
 
+func (r *repository) GetShiftIDsByNames(ctx context.Context, names []string) (map[string]int64, error) {
+	if len(names) == 0 {
+		return map[string]int64{}, nil
+	}
+	query, args, err := sqlx.In(`
+		SELECT id, name
+		FROM shifts
+		WHERE name IN (?)
+	`, names)
+	if err != nil {
+		return nil, err
+	}
+	query = r.app.Ds.ReaderDB.Rebind(query)
+
+	type row struct {
+		ID   int64  `db:"id"`
+		Name string `db:"name"`
+	}
+	var rows []row
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(rows))
+	for _, rrow := range rows {
+		result[rrow.Name] = rrow.ID
+	}
+	return result, nil
+}
+
 func (r *repository) AssignUserShift(ctx context.Context, userID, shiftID int64, shiftDate time.Time) (*entities.UserShift, error) {
 	res, err := r.app.Ds.WriterDB.ExecContext(ctx, `
 		INSERT INTO user_shifts (user_id, shift_id, shift_date)
@@ -351,6 +596,27 @@ func (r *repository) AssignUserShift(ctx context.Context, userID, shiftID int64,
 		return nil, err
 	}
 	return &us, nil
+}
+
+func (r *repository) UpsertUserShift(ctx context.Context, userID, shiftID int64, shiftDate time.Time) (bool, bool, error) {
+	res, err := r.app.Ds.WriterDB.ExecContext(ctx, `
+		INSERT INTO user_shifts (user_id, shift_id, shift_date, is_swapped)
+		VALUES (?, ?, ?, 0)
+		ON DUPLICATE KEY UPDATE
+			shift_id = VALUES(shift_id),
+			is_swapped = VALUES(is_swapped),
+			updated_at = CURRENT_TIMESTAMP
+	`, userID, shiftID, shiftDate.Format("2006-01-02"))
+	if err != nil {
+		return false, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, false, err
+	}
+	inserted := affected == 1
+	updated := affected == 2
+	return inserted, updated, nil
 }
 
 func (r *repository) UpdateShift(ctx context.Context, id int64, name string, startTime, endTime time.Time, lateTolerance int) (*entities.Shift, error) {
@@ -653,6 +919,201 @@ func (r *repository) ListUserShifts(ctx context.Context, date *time.Time, limit,
 
 	var rows []*entities.AdminUserShiftRow
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// Dashboard queries
+
+func (r *repository) GetDashboardSummary(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardSummary, error) {
+	var row entities.AdminDashboardSummary
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			(SELECT COUNT(*) FROM users WHERE role = 'SATPAM' AND active = 1) AS total_security,
+			COUNT(us.id) AS scheduled_days,
+			COUNT(a.id) AS present_days,
+			COALESCE(SUM(CASE WHEN a.clock_in_status = 'ON_TIME' THEN 1 ELSE 0 END), 0) AS on_time_days,
+			COUNT(us.id) - COUNT(a.id) AS absent_days,
+			COALESCE(SUM(
+				CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') AND a.clock_in_time IS NOT NULL THEN
+					GREATEST(
+						TIMESTAMPDIFF(
+							MINUTE,
+							DATE_ADD(TIMESTAMP(a.attendance_date, s.start_time), INTERVAL s.late_tolerance_minute MINUTE),
+							a.clock_in_time
+						),
+						0
+					)
+				ELSE 0 END
+			), 0) AS total_late_minutes,
+			COALESCE(SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END), 0) AS late_records,
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() THEN 1 ELSE 0 END), 0) AS past_scheduled_days,
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS past_present_days,
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.clock_in_status = 'ON_TIME' THEN 1 ELSE 0 END), 0) AS past_on_time_days
+		FROM user_shifts us
+		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
+		LEFT JOIN attendance a
+			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
+		WHERE us.shift_date BETWEEN ? AND ?
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		if err == sql.ErrNoRows {
+			return &entities.AdminDashboardSummary{}, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *repository) GetDashboardTrend(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardTrendRow, error) {
+	var rows []*entities.AdminDashboardTrendRow
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
+		SELECT
+			us.shift_date AS shift_date,
+			COUNT(us.id) AS scheduled,
+			COUNT(a.id) AS present,
+			SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END) AS late
+		FROM user_shifts us
+		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
+		LEFT JOIN attendance a
+			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
+		WHERE us.shift_date BETWEEN ? AND ?
+		GROUP BY us.shift_date
+		ORDER BY us.shift_date ASC
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *repository) GetDashboardDiscipline(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardDisciplineRow, error) {
+	var row entities.AdminDashboardDisciplineRow
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END), 0) AS late,
+			COALESCE(SUM(
+				CASE WHEN us.shift_date <= CURDATE()
+					AND a.clock_out_time IS NOT NULL AND a.clock_in_time IS NOT NULL
+					AND TIMESTAMP(a.attendance_date, s.end_time) > a.clock_out_time
+				THEN 1 ELSE 0 END
+			), 0) AS early_leave,
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NOT NULL AND a.clock_in_time IS NULL THEN 1 ELSE 0 END), 0) AS no_checkin,
+			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NULL THEN 1 ELSE 0 END), 0) AS missed_shift,
+			COALESCE(SUM(CASE WHEN us.shift_date > CURDATE() THEN 1 ELSE 0 END), 0) AS future_scheduled
+		FROM user_shifts us
+		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
+		LEFT JOIN attendance a
+			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
+		WHERE us.shift_date BETWEEN ? AND ?
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		if err == sql.ErrNoRows {
+			return &entities.AdminDashboardDisciplineRow{}, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *repository) GetDashboardRiskEmployees(ctx context.Context, startDate, endDate time.Time, limit int) ([]*entities.AdminDashboardRiskRow, error) {
+	var rows []*entities.AdminDashboardRiskRow
+	args := []interface{}{startDate.Format("2006-01-02"), endDate.Format("2006-01-02")}
+	query := `
+		SELECT
+			u.id AS user_id,
+			u.name AS user_name,
+			COALESCE(p.jabatan, 'Satpam') AS position,
+			SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END) AS late_count,
+			SUM(CASE WHEN a.id IS NULL THEN 1 ELSE 0 END) AS absent_count,
+			SUM(CASE WHEN a.id IS NOT NULL AND a.clock_in_time IS NULL THEN 1 ELSE 0 END) AS no_checkin_count,
+			SUM(CASE WHEN a.id IS NULL THEN 1 ELSE 0 END) AS missed_shift_count
+		FROM user_shifts us
+		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		LEFT JOIN satpam_profiles p ON p.user_id = u.id
+		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
+		LEFT JOIN attendance a
+			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
+		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= CURDATE()
+		GROUP BY u.id, u.name
+		HAVING late_count > 0 OR absent_count > 0 OR no_checkin_count > 0 OR missed_shift_count > 0
+		ORDER BY (late_count * 2 + absent_count * 5 + no_checkin_count * 4 + missed_shift_count * 3) DESC
+	`
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *repository) GetDashboardConsistency(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardConsistencyRow, error) {
+	var rows []*entities.AdminDashboardConsistencyRow
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
+		SELECT
+			us.user_id AS user_id,
+			COUNT(us.id) AS scheduled,
+			COUNT(a.id) AS present
+		FROM user_shifts us
+		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
+		LEFT JOIN attendance a
+			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
+		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= CURDATE()
+		GROUP BY us.user_id
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *repository) GetDashboardAudit(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardAuditRow, error) {
+	var row entities.AdminDashboardAuditRow
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			COALESCE(SUM(CASE WHEN override_by_admin_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS manual_override,
+			COALESCE(SUM(
+				CASE WHEN clock_in_time IS NOT NULL AND clock_out_time IS NOT NULL
+					AND clock_in_photo_url IS NOT NULL AND clock_out_photo_url IS NOT NULL
+				THEN 1 ELSE 0 END
+			), 0) AS complete_records,
+			COALESCE(COUNT(*), 0) AS total_records
+		FROM attendance
+		WHERE attendance_date BETWEEN ? AND ? AND attendance_date <= CURDATE()
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		if err == sql.ErrNoRows {
+			return &entities.AdminDashboardAuditRow{}, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+// RBAC
+
+func (r *repository) GetUserPermissions(ctx context.Context, userID int64) ([]string, error) {
+	var codes []string
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &codes, `
+		SELECT permission_code
+		FROM user_permissions
+		WHERE user_id = ?
+		ORDER BY permission_code ASC
+	`, userID); err != nil {
+		return nil, err
+	}
+	return codes, nil
+}
+
+func (r *repository) ListPermissions(ctx context.Context) ([]*entities.Permission, error) {
+	var rows []*entities.Permission
+	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
+		SELECT code, COALESCE(label, code) AS label
+		FROM permissions
+		ORDER BY code ASC
+	`); err != nil {
 		return nil, err
 	}
 	return rows, nil

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"siaga-api/api/entities"
 	"siaga-api/api/models/responses"
 
 	"github.com/gofiber/fiber/v2"
@@ -43,6 +44,32 @@ func getPaginationParams(c *fiber.Ctx) (limit, offset int, err error) {
 	limit = pageSize
 	offset = (page - 1) * pageSize
 	return limit, offset, nil
+}
+
+// Admin profile / RBAC
+
+func AdminMe(c *fiber.Ctx) error {
+	userAny := c.Locals("user")
+	user, ok := userAny.(*entities.User)
+	if !ok || user == nil {
+		return HttpError(c, responses.InternalServerError(fmt.Errorf("user not loaded")))
+	}
+
+	rawPerms := c.Locals("permissions")
+	perms, _ := rawPerms.([]string)
+	if perms == nil {
+		perms = []string{}
+	}
+
+	resp := fiber.Map{
+		"id":          user.ID,
+		"name":        user.Name,
+		"email":       user.Email,
+		"role":        user.Role,
+		"permissions": perms,
+	}
+
+	return HttpSuccess(c, resp)
 }
 
 // Import / Export helpers
@@ -202,13 +229,99 @@ func AdminExportAttendanceMonitoring(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).Send(data)
 }
 
+func AdminDownloadSchedulingTemplate(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	monthParam := c.Query("month")
+	yearParam := c.Query("year")
+
+	now := time.Now()
+	month := int(now.Month())
+	year := now.Year()
+
+	if monthParam != "" {
+		if v, err := strconv.Atoi(monthParam); err == nil && v >= 1 && v <= 12 {
+			month = v
+		} else {
+			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid month")))
+		}
+	}
+	if yearParam != "" {
+		if v, err := strconv.Atoi(yearParam); err == nil && v >= 2000 && v <= 2100 {
+			year = v
+		} else {
+			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid year")))
+		}
+	}
+
+	data, err := app.Services.Admin.GenerateSchedulingTemplate(c.Context(), month, year)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	filename := fmt.Sprintf("SIAGA_Scheduling_Template_%04d-%02d.xlsx", year, month)
+	c.Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	return c.Status(fiber.StatusOK).Send(data)
+}
+
+func AdminImportScheduling(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("file is required")))
+	}
+	if fileHeader.Size == 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("file is empty")))
+	}
+	if !strings.HasSuffix(strings.ToLower(fileHeader.Filename), ".xlsx") {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("file must be .xlsx")))
+	}
+
+	f, err := fileHeader.Open()
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("failed to open file")))
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("failed to read file")))
+	}
+
+	result, err := app.Services.Admin.ImportSchedulingFromExcel(c.Context(), adminID, data)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, result)
+}
+
 // 3) CREATE SATPAM
 
 type adminCreateSatpamRequest struct {
-	Email         string `json:"email"`
-	Password      string `json:"password"`
-	Name          string `json:"name"`
-	WorkStartDate string `json:"work_start_date"`
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	Name             string `json:"name"`
+	IsActive         *bool  `json:"is_active"`
+	Jabatan          string `json:"jabatan"`
+	JenisKelamin     string `json:"jenis_kelamin"`
+	TanggalLahir     string `json:"tanggal_lahir"`
+	TempatLahir      string `json:"tempat_lahir"`
+	NoKTP            string `json:"no_ktp"`
+	Alamat           string `json:"alamat"`
+	NoTelepon        string `json:"no_telepon"`
+	Agama            string `json:"agama"`
+	StatusPernikahan string `json:"status_pernikahan"`
+	Kebangsaan       string `json:"kebangsaan"`
+	WorkStartDate    string `json:"work_start_date"`
 }
 
 func AdminCreateSatpam(c *fiber.Ctx) error {
@@ -222,39 +335,280 @@ func AdminCreateSatpam(c *fiber.Ctx) error {
 		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
 	}
 
-	if req.Email == "" || req.Password == "" || req.Name == "" {
-		return HttpError(c, responses.BadRequest(fmt.Errorf("email, password and name are required")))
+	if req.Email == "" || req.Password == "" || req.Name == "" || req.Jabatan == "" || req.JenisKelamin == "" || req.Alamat == "" || req.NoTelepon == "" || req.WorkStartDate == "" {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("name, email, password, jabatan, jenis_kelamin, alamat, no_telepon and work_start_date are required")))
 	}
 
-	var workStart *time.Time
-	if req.WorkStartDate != "" {
-		d, err := time.Parse("2006-01-02", req.WorkStartDate)
+	workStart, err := time.Parse("2006-01-02", req.WorkStartDate)
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid work_start_date format, expected YYYY-MM-DD")))
+	}
+
+	var tanggalLahirPtr *time.Time
+	if req.TanggalLahir != "" {
+		d, err := time.Parse("2006-01-02", req.TanggalLahir)
 		if err != nil {
-			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid work_start_date format, expected YYYY-MM-DD")))
+			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid tanggal_lahir format, expected YYYY-MM-DD")))
 		}
-		workStart = &d
+		tanggalLahirPtr = &d
 	}
 
-	user, err := app.Services.Admin.CreateSatpam(c.Context(), adminID, req.Email, req.Password, req.Name, workStart)
+	var tempatLahirPtr *string
+	if strings.TrimSpace(req.TempatLahir) != "" {
+		v := strings.TrimSpace(req.TempatLahir)
+		tempatLahirPtr = &v
+	}
+	var noKTPPtr *string
+	if strings.TrimSpace(req.NoKTP) != "" {
+		v := strings.TrimSpace(req.NoKTP)
+		noKTPPtr = &v
+	}
+	var agamaPtr *string
+	if strings.TrimSpace(req.Agama) != "" {
+		v := strings.TrimSpace(req.Agama)
+		agamaPtr = &v
+	}
+	var statusPernikahanPtr *string
+	if strings.TrimSpace(req.StatusPernikahan) != "" {
+		v := strings.TrimSpace(req.StatusPernikahan)
+		statusPernikahanPtr = &v
+	}
+	var kebangsaanPtr *string
+	if strings.TrimSpace(req.Kebangsaan) != "" {
+		v := strings.TrimSpace(req.Kebangsaan)
+		kebangsaanPtr = &v
+	}
+
+	isActive := true
+	if req.IsActive != nil {
+		isActive = *req.IsActive
+	}
+
+	payload := &entities.SatpamUpsertPayload{
+		Name:             req.Name,
+		Email:            req.Email,
+		Active:           isActive,
+		Jabatan:          req.Jabatan,
+		JenisKelamin:     req.JenisKelamin,
+		TanggalLahir:     tanggalLahirPtr,
+		TempatLahir:      tempatLahirPtr,
+		NoKTP:            noKTPPtr,
+		Alamat:           req.Alamat,
+		NoTelepon:        req.NoTelepon,
+		Agama:            agamaPtr,
+		StatusPernikahan: statusPernikahanPtr,
+		Kebangsaan:       kebangsaanPtr,
+		WorkStartDate:    workStart,
+	}
+
+	user, err := app.Services.Admin.CreateSatpam(c.Context(), adminID, payload, req.Password)
 	if err != nil {
 		return HttpError(c, err)
 	}
 
-	var workStartStr string
-	if user.WorkStartDate != nil {
-		workStartStr = user.WorkStartDate.Format("2006-01-02")
+	return HttpSuccess(c, user)
+}
+
+// Permissions listing
+
+func AdminListPermissions(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	perms, err := app.Services.Admin.ListPermissions(c.Context())
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	items := make([]fiber.Map, 0, len(perms))
+	for _, p := range perms {
+		items = append(items, fiber.Map{
+			"code":  p.Code,
+			"label": p.Label,
+		})
+	}
+
+	return HttpSuccess(c, items)
+}
+
+// Admin management
+
+type adminPayload struct {
+	Name        string   `json:"name"`
+	Email       string   `json:"email"`
+	Password    string   `json:"password"`
+	Permissions []string `json:"permissions"`
+}
+
+func AdminListAdmins(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	limit, offset, err := getPaginationParams(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	admins, err := app.Services.Admin.ListAdmins(c.Context(), limit, offset)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	items := make([]fiber.Map, 0, len(admins))
+	for _, u := range admins {
+		_, perms, err := app.Services.Admin.GetAdminWithPermissions(c.Context(), u.ID)
+		if err != nil {
+			return HttpError(c, err)
+		}
+		items = append(items, fiber.Map{
+			"id":          u.ID,
+			"name":        u.Name,
+			"email":       u.Email,
+			"permissions": perms,
+		})
+	}
+
+	return HttpSuccess(c, items)
+}
+
+func AdminCreateAdmin(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	var req adminPayload
+	if err := c.BodyParser(&req); err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
+	}
+
+	user, perms, err := app.Services.Admin.CreateAdminUser(c.Context(), adminID, req.Email, req.Password, req.Name, req.Permissions)
+	if err != nil {
+		return HttpError(c, err)
 	}
 
 	resp := fiber.Map{
-		"id":              user.ID,
-		"email":           user.Email,
-		"name":            user.Name,
-		"work_start_date": workStartStr,
-		"is_active":       user.Active,
+		"id":          user.ID,
+		"name":        user.Name,
+		"email":       user.Email,
+		"permissions": perms,
 	}
-
 	return HttpSuccess(c, resp)
 }
+
+func AdminGetAdmin(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	user, perms, err := app.Services.Admin.GetAdminWithPermissions(c.Context(), id)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	resp := fiber.Map{
+		"id":          user.ID,
+		"name":        user.Name,
+		"email":       user.Email,
+		"permissions": perms,
+	}
+	return HttpSuccess(c, resp)
+}
+
+func AdminUpdateAdmin(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	var req adminPayload
+	if err := c.BodyParser(&req); err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
+	}
+
+	user, perms, err := app.Services.Admin.UpdateAdminUser(c.Context(), adminID, id, req.Email, req.Name, req.Permissions)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	resp := fiber.Map{
+		"id":          user.ID,
+		"name":        user.Name,
+		"email":       user.Email,
+		"permissions": perms,
+	}
+	return HttpSuccess(c, resp)
+}
+
+func AdminDeleteAdmin(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	if err := app.Services.Admin.DeleteAdminUser(c.Context(), adminID, id); err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, fiber.Map{
+		"id": id,
+	})
+}
+
+type resetPasswordPayload struct {
+	NewPassword string `json:"new_password"`
+}
+
+func AdminResetAdminPassword(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	var req resetPasswordPayload
+	if err := c.BodyParser(&req); err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
+	}
+
+	if err := app.Services.Admin.ResetAdminPassword(c.Context(), adminID, id, req.NewPassword); err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, fiber.Map{
+		"id": id,
+	})
+}
+
+
 
 // 4) LIST SATPAM
 
@@ -284,22 +638,7 @@ func AdminListSatpam(c *fiber.Ctx) error {
 		return HttpError(c, err)
 	}
 
-	items := make([]fiber.Map, 0, len(users))
-	for _, u := range users {
-		var workStartStr string
-		if u.WorkStartDate != nil {
-			workStartStr = u.WorkStartDate.Format("2006-01-02")
-		}
-		items = append(items, fiber.Map{
-			"id":              u.ID,
-			"email":           u.Email,
-			"name":            u.Name,
-			"work_start_date": workStartStr,
-			"is_active":       u.Active,
-		})
-	}
-
-	return HttpSuccess(c, items)
+	return HttpSuccess(c, users)
 }
 
 // 5) ENABLE / DISABLE SATPAM
@@ -339,9 +678,20 @@ func AdminSetSatpamStatus(c *fiber.Ctx) error {
 }
 
 type adminUpdateSatpamRequest struct {
-	Email         string `json:"email"`
-	Name          string `json:"name"`
-	WorkStartDate string `json:"work_start_date"`
+	Email            string `json:"email"`
+	Name             string `json:"name"`
+	IsActive         *bool  `json:"is_active"`
+	Jabatan          string `json:"jabatan"`
+	JenisKelamin     string `json:"jenis_kelamin"`
+	TanggalLahir     string `json:"tanggal_lahir"`
+	TempatLahir      string `json:"tempat_lahir"`
+	NoKTP            string `json:"no_ktp"`
+	Alamat           string `json:"alamat"`
+	NoTelepon        string `json:"no_telepon"`
+	Agama            string `json:"agama"`
+	StatusPernikahan string `json:"status_pernikahan"`
+	Kebangsaan       string `json:"kebangsaan"`
+	WorkStartDate    string `json:"work_start_date"`
 }
 
 func AdminUpdateSatpam(c *fiber.Ctx) error {
@@ -360,38 +710,78 @@ func AdminUpdateSatpam(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
 	}
-	if req.Email == "" || req.Name == "" {
-		return HttpError(c, responses.BadRequest(fmt.Errorf("email and name are required")))
+	if req.Email == "" || req.Name == "" || req.Jabatan == "" || req.JenisKelamin == "" || req.Alamat == "" || req.NoTelepon == "" || req.WorkStartDate == "" {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("name, email, jabatan, jenis_kelamin, alamat, no_telepon and work_start_date are required")))
 	}
 
-	var workStart *time.Time
-	if req.WorkStartDate != "" {
-		d, err := time.Parse("2006-01-02", req.WorkStartDate)
+	workStart, err := time.Parse("2006-01-02", req.WorkStartDate)
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid work_start_date format, expected YYYY-MM-DD")))
+	}
+
+	var tanggalLahirPtr *time.Time
+	if req.TanggalLahir != "" {
+		d, err := time.Parse("2006-01-02", req.TanggalLahir)
 		if err != nil {
-			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid work_start_date format, expected YYYY-MM-DD")))
+			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid tanggal_lahir format, expected YYYY-MM-DD")))
 		}
-		workStart = &d
+		tanggalLahirPtr = &d
 	}
 
-	user, err := app.Services.Admin.UpdateSatpam(c.Context(), adminID, userID, req.Email, req.Name, workStart)
+	var tempatLahirPtr *string
+	if strings.TrimSpace(req.TempatLahir) != "" {
+		v := strings.TrimSpace(req.TempatLahir)
+		tempatLahirPtr = &v
+	}
+	var noKTPPtr *string
+	if strings.TrimSpace(req.NoKTP) != "" {
+		v := strings.TrimSpace(req.NoKTP)
+		noKTPPtr = &v
+	}
+	var agamaPtr *string
+	if strings.TrimSpace(req.Agama) != "" {
+		v := strings.TrimSpace(req.Agama)
+		agamaPtr = &v
+	}
+	var statusPernikahanPtr *string
+	if strings.TrimSpace(req.StatusPernikahan) != "" {
+		v := strings.TrimSpace(req.StatusPernikahan)
+		statusPernikahanPtr = &v
+	}
+	var kebangsaanPtr *string
+	if strings.TrimSpace(req.Kebangsaan) != "" {
+		v := strings.TrimSpace(req.Kebangsaan)
+		kebangsaanPtr = &v
+	}
+
+	isActive := true
+	if req.IsActive != nil {
+		isActive = *req.IsActive
+	}
+
+	payload := &entities.SatpamUpsertPayload{
+		Name:             req.Name,
+		Email:            req.Email,
+		Active:           isActive,
+		Jabatan:          req.Jabatan,
+		JenisKelamin:     req.JenisKelamin,
+		TanggalLahir:     tanggalLahirPtr,
+		TempatLahir:      tempatLahirPtr,
+		NoKTP:            noKTPPtr,
+		Alamat:           req.Alamat,
+		NoTelepon:        req.NoTelepon,
+		Agama:            agamaPtr,
+		StatusPernikahan: statusPernikahanPtr,
+		Kebangsaan:       kebangsaanPtr,
+		WorkStartDate:    workStart,
+	}
+
+	user, err := app.Services.Admin.UpdateSatpam(c.Context(), adminID, userID, payload)
 	if err != nil {
 		return HttpError(c, err)
 	}
 
-	var workStartStr string
-	if user.WorkStartDate != nil {
-		workStartStr = user.WorkStartDate.Format("2006-01-02")
-	}
-
-	resp := fiber.Map{
-		"id":              user.ID,
-		"email":           user.Email,
-		"name":            user.Name,
-		"work_start_date": workStartStr,
-		"is_active":       user.Active,
-	}
-
-	return HttpSuccess(c, resp)
+	return HttpSuccess(c, user)
 }
 
 func AdminDeleteSatpam(c *fiber.Ctx) error {
@@ -407,6 +797,32 @@ func AdminDeleteSatpam(c *fiber.Ctx) error {
 	}
 
 	if err := app.Services.Admin.DeleteSatpam(c.Context(), adminID, userID); err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, fiber.Map{
+		"id": userID,
+	})
+}
+
+func AdminResetSatpamPassword(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || userID <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	var req resetPasswordPayload
+	if err := c.BodyParser(&req); err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
+	}
+
+	if err := app.Services.Admin.ResetSatpamPassword(c.Context(), adminID, userID, req.NewPassword); err != nil {
 		return HttpError(c, err)
 	}
 
@@ -1135,6 +1551,33 @@ func AdminForceClockOutAttendance(c *fiber.Ctx) error {
 		"attendance_id": attID,
 		"status":        "force_clocked_out",
 	})
+}
+
+func AdminDashboard(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	monthStr := c.Query("month", "")
+	var month time.Time
+	if monthStr == "" {
+		now := time.Now()
+		month = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	} else {
+		parsed, err := time.Parse("2006-01", monthStr)
+		if err != nil {
+			return HttpError(c, responses.BadRequest(fmt.Errorf("invalid month, expected YYYY-MM")))
+		}
+		month = parsed
+	}
+
+	resp, err := app.Services.Admin.GetDashboard(c.Context(), month)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, resp)
 }
 
 // List user attendance spots (for spot assignment view)

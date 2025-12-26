@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,19 +43,48 @@ func Init(app *contracts.App) contracts.AdminService {
 	}
 }
 
+func monthRange(month time.Time) (time.Time, time.Time) {
+	start := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, month.Location())
+	end := start.AddDate(0, 1, -1)
+	return start, end
+}
+
 // Satpam management
 
-func (s *Service) CreateSatpam(ctx context.Context, adminID int64, email, password, name string, workStartDate *time.Time) (*entities.User, error) {
-	if email == "" || password == "" || name == "" {
-		return nil, responses.BadRequest(errors.New("email, password and name are required"))
+func (s *Service) CreateSatpam(ctx context.Context, adminID int64, payload *entities.SatpamUpsertPayload, password string) (*entities.SatpamWithProfile, error) {
+	if payload == nil {
+		return nil, responses.BadRequest(errors.New("payload is required"))
 	}
+
+	email := strings.TrimSpace(payload.Email)
+	name := strings.TrimSpace(payload.Name)
+	password = strings.TrimSpace(password)
+	jabatan := strings.TrimSpace(payload.Jabatan)
+	alamat := strings.TrimSpace(payload.Alamat)
+	noTelepon := strings.TrimSpace(payload.NoTelepon)
+
+	if email == "" || password == "" || name == "" || jabatan == "" || alamat == "" || noTelepon == "" {
+		return nil, responses.BadRequest(errors.New("name, email, password, jabatan, alamat and no_telepon are required"))
+	}
+	if len(password) < 8 {
+		return nil, responses.BadRequest(errors.New("password minimum length is 8 characters"))
+	}
+	if payload.JenisKelamin != "L" && payload.JenisKelamin != "P" {
+		return nil, responses.BadRequest(errors.New("jenis_kelamin must be 'L' or 'P'"))
+	}
+
+	payload.Email = email
+	payload.Name = name
+	payload.Jabatan = jabatan
+	payload.Alamat = alamat
+	payload.NoTelepon = noTelepon
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
 
-	user, err := s.repo.CreateSatpam(ctx, email, string(hash), name, workStartDate)
+	user, err := s.repo.CreateSatpam(ctx, payload, string(hash))
 	if err != nil {
 		if responses.IsDuplicateErr(err) {
 			return nil, responses.Conflict(errors.New("email already in use"))
@@ -66,12 +97,257 @@ func (s *Service) CreateSatpam(ctx context.Context, adminID int64, email, passwo
 	return user, nil
 }
 
-func (s *Service) ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.User, error) {
+func (s *Service) ListSatpam(ctx context.Context, active *bool, limit, offset int) ([]*entities.SatpamWithProfile, error) {
 	users, err := s.repo.ListSatpam(ctx, active, limit, offset)
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
 	return users, nil
+}
+
+// RBAC / Permissions
+
+func (s *Service) ListPermissions(ctx context.Context) ([]*entities.Permission, error) {
+	rows, err := s.repo.ListPermissions(ctx)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	return rows, nil
+}
+
+func (s *Service) ListAdmins(ctx context.Context, limit, offset int) ([]*entities.User, error) {
+	users, err := s.repo.ListAdmins(ctx, limit, offset)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	return users, nil
+}
+
+func (s *Service) GetAdminWithPermissions(ctx context.Context, id int64) (*entities.User, []string, error) {
+	user, err := s.repo.GetAdminByID(ctx, id)
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+	if user == nil {
+		return nil, nil, responses.NotFound(errors.New("admin not found"))
+	}
+	perms, err := s.repo.GetUserPermissions(ctx, id)
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+	return user, perms, nil
+}
+
+func (s *Service) validatePermissionCodes(ctx context.Context, codes []string) ([]string, error) {
+	if len(codes) == 0 {
+		return []string{}, nil
+	}
+	perms, err := s.repo.ListPermissions(ctx)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	allowed := make(map[string]struct{}, len(perms))
+	for _, p := range perms {
+		allowed[p.Code] = struct{}{}
+	}
+	unique := make(map[string]struct{})
+	var cleaned []string
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		if _, ok := allowed[code]; !ok {
+			return nil, responses.BadRequest(fmt.Errorf("unknown permission code: %s", code))
+		}
+		if _, seen := unique[code]; !seen {
+			unique[code] = struct{}{}
+			cleaned = append(cleaned, code)
+		}
+	}
+	return cleaned, nil
+}
+
+func (s *Service) CreateAdminUser(ctx context.Context, actorID int64, email, password, name string, perms []string) (*entities.User, []string, error) {
+	_ = actorID
+
+	email = strings.TrimSpace(email)
+	password = strings.TrimSpace(password)
+	name = strings.TrimSpace(name)
+
+	if email == "" || password == "" || name == "" {
+		return nil, nil, responses.BadRequest(errors.New("name, email and password are required"))
+	}
+	if len(password) < 8 {
+		return nil, nil, responses.BadRequest(errors.New("password minimum length is 8 characters"))
+	}
+
+	perms, err := s.validatePermissionCodes(ctx, perms)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	tx, err := s.app.Ds.WriterDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO users (name, email, password_hash, role, active)
+		VALUES (?, ?, ?, 'ADMIN', 1)
+	`, name, email, string(hash))
+	if err != nil {
+		if responses.IsDuplicateErr(err) {
+			return nil, nil, responses.Conflict(errors.New("email already in use"))
+		}
+		return nil, nil, responses.InternalServerError(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	for _, code := range perms {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO user_permissions (user_id, permission_code)
+			VALUES (?, ?)
+		`, id, code); err != nil {
+			return nil, nil, responses.InternalServerError(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	var user entities.User
+	if err := s.app.Ds.ReaderDB.GetContext(ctx, &user, `
+		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
+		FROM users
+		WHERE id = ?
+	`, id); err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	return &user, perms, nil
+}
+
+func (s *Service) UpdateAdminUser(ctx context.Context, actorID, id int64, email, name string, perms []string) (*entities.User, []string, error) {
+	_ = actorID
+
+	email = strings.TrimSpace(email)
+	name = strings.TrimSpace(name)
+	if email == "" || name == "" {
+		return nil, nil, responses.BadRequest(errors.New("name and email are required"))
+	}
+
+	perms, err := s.validatePermissionCodes(ctx, perms)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tx, err := s.app.Ds.WriterDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users
+		SET name = ?, email = ?
+		WHERE id = ? AND role = 'ADMIN'
+	`, name, email, id); err != nil {
+		if responses.IsDuplicateErr(err) {
+			return nil, nil, responses.Conflict(errors.New("email already in use"))
+		}
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM user_permissions WHERE user_id = ?
+	`, id); err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+	for _, code := range perms {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO user_permissions (user_id, permission_code)
+			VALUES (?, ?)
+		`, id, code); err != nil {
+			return nil, nil, responses.InternalServerError(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	var user entities.User
+	if err := s.app.Ds.ReaderDB.GetContext(ctx, &user, `
+		SELECT id, name, email, password_hash, role, work_start_date, active, created_at, updated_at
+		FROM users
+		WHERE id = ? AND role = 'ADMIN'
+	`, id); err != nil {
+		return nil, nil, responses.InternalServerError(err)
+	}
+
+	return &user, perms, nil
+}
+
+func (s *Service) DeleteAdminUser(ctx context.Context, actorID, id int64) error {
+	_ = actorID
+
+	tx, err := s.app.Ds.WriterDB.BeginTxx(ctx, nil)
+	if err != nil {
+		return responses.InternalServerError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM user_permissions WHERE user_id = ?
+	`, id); err != nil {
+		return responses.InternalServerError(err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM users WHERE id = ? AND role = 'ADMIN'
+	`, id); err != nil {
+		return responses.InternalServerError(err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return responses.InternalServerError(err)
+	}
+
+	return nil
+}
+
+func (s *Service) ResetAdminPassword(ctx context.Context, actorID, id int64, newPassword string) error {
+	_ = actorID
+
+	newPassword = strings.TrimSpace(newPassword)
+	if len(newPassword) < 8 {
+		return responses.BadRequest(errors.New("password minimum length is 8 characters"))
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return responses.InternalServerError(err)
+	}
+
+	if _, err := s.app.Ds.WriterDB.ExecContext(ctx, `
+		UPDATE users
+		SET password_hash = ?
+		WHERE id = ? AND role = 'ADMIN'
+	`, string(hash), id); err != nil {
+		return responses.InternalServerError(err)
+	}
+	return nil
 }
 
 func (s *Service) SetSatpamActive(ctx context.Context, adminID, userID int64, active bool) error {
@@ -84,12 +360,31 @@ func (s *Service) SetSatpamActive(ctx context.Context, adminID, userID int64, ac
 	return nil
 }
 
-func (s *Service) UpdateSatpam(ctx context.Context, adminID, userID int64, email, name string, workStartDate *time.Time) (*entities.User, error) {
-	if email == "" || name == "" {
-		return nil, responses.BadRequest(errors.New("email and name are required"))
+func (s *Service) UpdateSatpam(ctx context.Context, adminID, userID int64, payload *entities.SatpamUpsertPayload) (*entities.SatpamWithProfile, error) {
+	if payload == nil {
+		return nil, responses.BadRequest(errors.New("payload is required"))
 	}
 
-	user, err := s.repo.UpdateSatpam(ctx, userID, email, name, workStartDate)
+	email := strings.TrimSpace(payload.Email)
+	name := strings.TrimSpace(payload.Name)
+	jabatan := strings.TrimSpace(payload.Jabatan)
+	alamat := strings.TrimSpace(payload.Alamat)
+	noTelepon := strings.TrimSpace(payload.NoTelepon)
+
+	if email == "" || name == "" || jabatan == "" || alamat == "" || noTelepon == "" {
+		return nil, responses.BadRequest(errors.New("name, email, jabatan, alamat and no_telepon are required"))
+	}
+	if payload.JenisKelamin != "L" && payload.JenisKelamin != "P" {
+		return nil, responses.BadRequest(errors.New("jenis_kelamin must be 'L' or 'P'"))
+	}
+
+	payload.Email = email
+	payload.Name = name
+	payload.Jabatan = jabatan
+	payload.Alamat = alamat
+	payload.NoTelepon = noTelepon
+
+	user, err := s.repo.UpdateSatpam(ctx, userID, payload)
 	if err != nil {
 		if responses.IsDuplicateErr(err) {
 			return nil, responses.Conflict(errors.New("email already in use"))
@@ -115,6 +410,43 @@ func (s *Service) DeleteSatpam(ctx context.Context, adminID, userID int64) error
 		}
 		return responses.InternalServerError(err)
 	}
+	return nil
+}
+
+func (s *Service) ResetSatpamPassword(ctx context.Context, adminID, userID int64, newPassword string) error {
+	if adminID == userID {
+		return responses.Forbidden(errors.New("cannot reset own password via this endpoint"))
+	}
+
+	user, err := s.repo.GetSatpamByID(ctx, userID)
+	if err != nil {
+		return responses.InternalServerError(err)
+	}
+	if user == nil {
+		return responses.NotFound(errors.New("satpam not found"))
+	}
+
+	newPassword = strings.TrimSpace(newPassword)
+	if newPassword == "" {
+		return responses.BadRequest(errors.New("new password is required"))
+	}
+	if len(newPassword) < 8 {
+		return responses.BadRequest(errors.New("password minimum length is 8 characters"))
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return responses.InternalServerError(err)
+	}
+
+	if _, err := s.app.Ds.WriterDB.ExecContext(ctx, `
+		UPDATE users
+		SET password_hash = ?
+		WHERE id = ? AND role = 'SATPAM'
+	`, string(hash), userID); err != nil {
+		return responses.InternalServerError(err)
+	}
+
 	return nil
 }
 
@@ -519,6 +851,295 @@ func (s *Service) ForceClockOutAttendance(ctx context.Context, adminID, attendan
 	return nil
 }
 
+func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.AdminDashboardResponse, error) {
+	start, end := monthRange(month)
+
+	// Current month aggregates
+	summaryRow, err := s.repo.GetDashboardSummary(ctx, start, end)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	trendRows, err := s.repo.GetDashboardTrend(ctx, start, end)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	discRow, err := s.repo.GetDashboardDiscipline(ctx, start, end)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	riskRows, err := s.repo.GetDashboardRiskEmployees(ctx, start, end, 10)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	consRows, err := s.repo.GetDashboardConsistency(ctx, start, end)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	auditRow, err := s.repo.GetDashboardAudit(ctx, start, end)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	// Previous month summary for KPI deltas / insight
+	prevMonth := month.AddDate(0, -1, 0)
+	prevStart, prevEnd := monthRange(prevMonth)
+	prevSummaryRow, err := s.repo.GetDashboardSummary(ctx, prevStart, prevEnd)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	resp := &entities.AdminDashboardResponse{}
+
+	// Summary calculations
+	resp.Summary.TotalSecurity = summaryRow.TotalSecurity
+	// Gunakan hanya shift yang sudah lewat untuk menghitung rate.
+	pastScheduled := summaryRow.PastScheduledDays
+	pastPresent := summaryRow.PastPresentDays
+	pastOnTime := summaryRow.PastOnTimeDays
+	if pastScheduled > 0 {
+		resp.Summary.AttendanceRate = float64(pastPresent) / float64(pastScheduled) * 100
+		resp.Summary.AbsentRate = float64(pastScheduled-pastPresent) / float64(pastScheduled) * 100
+	}
+	if pastPresent > 0 {
+		resp.Summary.OnTimeRate = float64(pastOnTime) / float64(pastPresent) * 100
+	}
+	if summaryRow.LateRecords > 0 {
+		resp.Summary.AvgLateMinutes = summaryRow.TotalLateMin / float64(summaryRow.LateRecords)
+	}
+
+	// Trend (satu bulan penuh, dengan label Belum Absen untuk shift di masa depan).
+	today := time.Now().Truncate(24 * time.Hour)
+	for _, r := range trendRows {
+		resp.AttendanceTrend.Labels = append(resp.AttendanceTrend.Labels, r.Date)
+		resp.AttendanceTrend.Present = append(resp.AttendanceTrend.Present, r.Present)
+		resp.AttendanceTrend.Late = append(resp.AttendanceTrend.Late, r.Late)
+
+		// Parse tanggal dari label; dukung format "2006-01-02" dan RFC3339.
+		dayDate, err := time.ParseInLocation("2006-01-02", r.Date, today.Location())
+		if err != nil {
+			if t2, err2 := time.Parse(time.RFC3339, r.Date); err2 == nil {
+				dayDate = t2
+			} else {
+				dayDate = today
+			}
+		}
+		dayDate = dayDate.Truncate(24 * time.Hour)
+
+		isFuture := dayDate.After(today)
+		if isFuture {
+			resp.AttendanceTrend.Absent = append(resp.AttendanceTrend.Absent, 0)
+			resp.AttendanceTrend.BelumAbsen = append(resp.AttendanceTrend.BelumAbsen, r.Scheduled)
+		} else {
+			absent := r.Scheduled - r.Present
+			if absent < 0 {
+				absent = 0
+			}
+			resp.AttendanceTrend.Absent = append(resp.AttendanceTrend.Absent, absent)
+			resp.AttendanceTrend.BelumAbsen = append(resp.AttendanceTrend.BelumAbsen, 0)
+		}
+	}
+
+	// Discipline breakdown
+	resp.DisciplineBreakdown.Late = discRow.Late
+	resp.DisciplineBreakdown.EarlyLeave = discRow.EarlyLeave
+	resp.DisciplineBreakdown.NoCheckin = discRow.NoCheckin
+	resp.DisciplineBreakdown.MissedShift = discRow.MissedShift
+	resp.DisciplineBreakdown.BelumAbsen = discRow.FutureShift
+
+	// Risk employees
+	for _, r := range riskRows {
+		absent := r.AbsentCount
+		riskScore := float64(r.LateCount*2 + absent*5 + r.NoCheckinCount*4 + r.MissedShiftCount*3)
+		// Determine dominant factor
+		maxVal := r.LateCount
+		reason := "Sering terlambat"
+		if absent > maxVal {
+			maxVal = absent
+			reason = "Sering absen"
+		}
+		if r.NoCheckinCount > maxVal {
+			maxVal = r.NoCheckinCount
+			reason = "Sering tidak check-in"
+		}
+		if r.MissedShiftCount > maxVal {
+			maxVal = r.MissedShiftCount
+			reason = "Sering tidak masuk shift"
+		}
+
+		resp.RiskEmployees = append(resp.RiskEmployees, struct {
+			ID         string  `json:"id"`
+			Name       string  `json:"name"`
+			Position   string  `json:"position"`
+			RiskScore  float64 `json:"risk_score"`
+			RiskReason string  `json:"risk_reason"`
+		}{
+			ID:         fmt.Sprintf("%d", r.UserID),
+			Name:       r.UserName,
+			Position:   r.Position,
+			RiskScore:  riskScore,
+			RiskReason: reason,
+		})
+	}
+
+	// Attendance consistency
+	totalUsers := 0
+	consistent := 0
+	var totalStreak float64
+	for _, r := range consRows {
+		if r.Scheduled == 0 {
+			continue
+		}
+		totalUsers++
+		presentRate := float64(r.Present) / float64(r.Scheduled)
+		if presentRate >= 0.9 {
+			consistent++
+		}
+		totalStreak += float64(r.Present)
+	}
+	resp.AttendanceConsistency.Consistent = consistent
+	if totalUsers > 0 {
+		resp.AttendanceConsistency.Irregular = totalUsers - consistent
+		resp.AttendanceConsistency.AvgStreakDays = totalStreak / float64(totalUsers)
+	}
+
+	// Audit compliance
+	resp.AuditCompliance.ManualOverride = auditRow.ManualOverride
+	if auditRow.TotalRecords > 0 {
+		resp.AuditCompliance.DataCompleteness = float64(auditRow.CompleteRecords) / float64(auditRow.TotalRecords) * 100
+	}
+
+	// KPI cards with deltas and status
+	currAttendanceRate := resp.Summary.AttendanceRate
+	currOnTimeRate := resp.Summary.OnTimeRate
+	currAbsentRate := resp.Summary.AbsentRate
+	currAvgLate := resp.Summary.AvgLateMinutes
+
+	var prevAttendanceRate, prevOnTimeRate, prevAbsentRate, prevAvgLate float64
+	if prevSummaryRow.ScheduledDays > 0 {
+		prevAttendanceRate = float64(prevSummaryRow.PresentDays) / float64(prevSummaryRow.ScheduledDays) * 100
+		prevAbsentRate = float64(prevSummaryRow.AbsentDays) / float64(prevSummaryRow.ScheduledDays) * 100
+	}
+	if prevSummaryRow.PresentDays > 0 {
+		prevOnTimeRate = float64(prevSummaryRow.OnTimeDays) / float64(prevSummaryRow.PresentDays) * 100
+	}
+	if prevSummaryRow.LateRecords > 0 {
+		prevAvgLate = prevSummaryRow.TotalLateMin / float64(prevSummaryRow.LateRecords)
+	}
+
+	resp.KPIs = append(resp.KPIs,
+		buildKPI("Attendance Rate", currAttendanceRate, prevAttendanceRate),
+		buildKPI("On-Time Rate", currOnTimeRate, prevOnTimeRate),
+		buildKPI("Absent Rate", currAbsentRate, prevAbsentRate),
+		buildKPI("Avg Late Minutes", currAvgLate, prevAvgLate),
+	)
+
+	// Hero insight derived from summary and risk employees
+	// resp.HeroInsight = buildHeroInsight(month, currAttendanceRate, currOnTimeRate, resp.KPIs, len(resp.RiskEmployees))
+
+	return resp, nil
+}
+
+func buildKPI(label string, value, prevValue float64) entities.AdminDashboardKPI {
+	delta := value - prevValue
+
+	trend := "flat"
+	const epsilon = 0.1
+	if delta > epsilon {
+		trend = "up"
+	} else if delta < -epsilon {
+		trend = "down"
+	}
+
+	status := "good"
+	switch label {
+	case "Attendance Rate":
+		// Good if >= 95, warning if >= 90, else bad
+		if value < 90 {
+			status = "bad"
+		} else if value < 95 {
+			status = "warning"
+		}
+	case "On-Time Rate":
+		// Good if >= 90, warning if >= 80, else bad
+		if value < 80 {
+			status = "bad"
+		} else if value < 90 {
+			status = "warning"
+		}
+	case "Absent Rate":
+		// Lower is better: good <= 3, warning <= 7, else bad
+		if value > 7 {
+			status = "bad"
+		} else if value > 3 {
+			status = "warning"
+		}
+	case "Avg Late Minutes":
+		// Lower is better: good <= 5, warning <= 10, else bad
+		if value > 10 {
+			status = "bad"
+		} else if value > 5 {
+			status = "warning"
+		}
+	}
+
+	return entities.AdminDashboardKPI{
+		Label:  label,
+		Value:  value,
+		Delta:  delta,
+		Trend:  trend,
+		Status: status,
+	}
+}
+
+// func buildHeroInsight(month time.Time, attendanceRate, onTimeRate float64, kpis []entities.AdminDashboardKPI, riskCount int) entities.AdminDashboardHeroInsight {
+// 	severity := "normal"
+// 	if attendanceRate < 80 || riskCount >= 3 {
+// 		severity = "critical"
+// 	} else if attendanceRate < 90 || riskCount >= 1 {
+// 		severity = "warning"
+// 	}
+
+// 	var headline string
+// 	var context string
+
+// 	monthLabel := month.Format("January 2006")
+
+// 	if severity == "critical" {
+// 		headline = fmt.Sprintf("Attendance turun dan perlu tindakan segera di %s.", monthLabel)
+// 		context = fmt.Sprintf("Rate kehadiran hanya %.1f%% dengan %d satpam berisiko. Fokuskan review pada jadwal dan disiplin shift yang sering terlambat.", attendanceRate, riskCount)
+// 	} else if severity == "warning" {
+// 		headline = fmt.Sprintf("Attendance di %s memerlukan perhatian manajemen.", monthLabel)
+// 		context = fmt.Sprintf("Rate kehadiran %.1f%% dan on-time %.1f%%. Lakukan coaching pada satpam dengan pola keterlambatan atau ketidakhadiran berulang.", attendanceRate, onTimeRate)
+// 	} else {
+// 		headline = fmt.Sprintf("Attendance di %s berada pada level stabil.", monthLabel)
+// 		context = fmt.Sprintf("Rate kehadiran %.1f%% dan on-time %.1f%%. Pertahankan pola jadwal dan monitoring berkala.", attendanceRate, onTimeRate)
+// 	}
+
+// 	// Enrich context with the most concerning KPI if available
+// 	if len(kpis) > 0 {
+// 		var worst entities.AdminDashboardKPI
+// 		for i, k := range kpis {
+// 			if i == 0 || k.Status == "bad" || (k.Status == "warning" && worst.Status == "good") {
+// 				worst = k
+// 			}
+// 		}
+// 		if worst.Status != "" {
+// 			context = fmt.Sprintf("%s Fokus khusus pada indikator %s (%.1f, Δ%.1f).", context, worst.Label, worst.Value, worst.Delta)
+// 		}
+// 	}
+
+// 	return entities.AdminDashboardHeroInsight{
+// 		Headline: headline,
+// 		Severity: severity,
+// 		Context:  context,
+// 	}
+// }
+
 // Import / Export helpers
 
 func setPrettyHeaderStyle(f *excelize.File, sheet string, lastCol int) error {
@@ -557,43 +1178,106 @@ func parseFlexibleDate(value string) (time.Time, error) {
 		return time.Time{}, errors.New("empty date")
 	}
 
-	// Excel serial date (e.g. 45205)
+	// --------------------------------------------------
+	// 1. Excel serial date (1900-based & 1904-based)
+	// --------------------------------------------------
 	if n, err := strconv.ParseFloat(value, 64); err == nil {
-		if t, err2 := excelize.ExcelDateToTime(n, false); err2 == nil {
-			return t, nil
-		}
-	}
-
-	// Strip time part if present (e.g. "2025-01-01 00:00:00")
-	if i := strings.IndexAny(value, " T"); i > 0 {
-		value = value[:i]
-	}
-
-	candidates := []string{value}
-	// Also try with unified separators
-	repl := strings.NewReplacer("\\", "/", "-", "/", ".", "/")
-	if v2 := repl.Replace(value); v2 != value {
-		candidates = append(candidates, v2)
-	}
-
-	layouts := []string{
-		"2006-01-02",
-		"2006/01/02",
-		"02/01/2006", // dd/mm/yyyy
-		"2/1/2006",
-		"02/01/06", // dd/mm/yy
-		"2/1/06",
-	}
-
-	for _, cand := range candidates {
-		for _, layout := range layouts {
-			if t, err := time.Parse(layout, cand); err == nil {
-				return t, nil
+		if n > 0 {
+			// try 1900 system
+			if t, err := excelize.ExcelDateToTime(n, false); err == nil {
+				return t.In(time.Local), nil
+			}
+			// try 1904 system (rare but exists)
+			if t, err := excelize.ExcelDateToTime(n, true); err == nil {
+				return t.In(time.Local), nil
 			}
 		}
 	}
 
-	return time.Time{}, fmt.Errorf("invalid date, expected YYYY-MM-DD or dd/mm/yyyy")
+	// --------------------------------------------------
+	// 2. Remove time part safely
+	// --------------------------------------------------
+	// Examples:
+	// 2025-01-01 00:00:00
+	// 01/02/2025 12:30
+	reTime := regexp.MustCompile(`\s+\d{1,2}:\d{2}(:\d{2})?`)
+	value = reTime.ReplaceAllString(value, "")
+
+	// Normalize separators
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.ReplaceAll(value, "-", "/")
+	value = strings.ReplaceAll(value, ".", "/")
+	value = strings.TrimSpace(value)
+
+	// --------------------------------------------------
+	// 3. Handle slash date explicitly (dd/mm/yy, dd/mm/yyyy)
+	// --------------------------------------------------
+	if strings.Contains(value, "/") {
+		parts := strings.Split(value, "/")
+		if len(parts) == 3 {
+			a, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+			b, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+			c, err3 := strconv.Atoi(strings.TrimSpace(parts[2]))
+
+			if err1 == nil && err2 == nil && err3 == nil {
+				day, month, year := 0, 0, c
+
+				// Fix 2-digit year
+				if year < 100 {
+					if year >= 70 {
+						year += 1900
+					} else {
+						year += 2000
+					}
+				}
+
+				// 🔥 STRONG RULES (NO AMBIGUITY)
+				switch {
+				case a > 12:
+					// 25/02/00 → dd/mm/yy
+					day, month = a, b
+
+				case b > 12:
+					// 02/25/00 → mm/dd/yy
+					day, month = b, a
+
+				default:
+					// Ambiguous → force dd/mm (Indonesia default)
+					day, month = a, b
+				}
+
+				if month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+					return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.Local), nil
+				}
+			}
+		}
+	}
+
+	// --------------------------------------------------
+	// 4. Textual & ISO layouts
+	// --------------------------------------------------
+	layouts := []string{
+		"2006-01-02",
+		"2006/01/02",
+		"02 Jan 2006",
+		"2 Jan 2006",
+		"02-Jan-2006",
+		"2-Jan-2006",
+		"02 Jan 06",
+		"2 Jan 06",
+		"02-Jan-06",
+		"2-Jan-06",
+		"Jan 2 2006",
+		"Jan 2, 2006",
+	}
+
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("invalid excel date format: %q", value)
 }
 
 func (s *Service) GenerateSatpamImportTemplate(ctx context.Context) ([]byte, error) {
@@ -602,12 +1286,27 @@ func (s *Service) GenerateSatpamImportTemplate(ctx context.Context) ([]byte, err
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(f.GetActiveSheetIndex())
 
+	// --------------------------------------------------
+	// Headers
+	// --------------------------------------------------
 	headers := []string{
 		"Nama",
 		"Email",
 		"Password",
+		"Aktif (TRUE/FALSE)",
+		"Jabatan",
+		"Jenis Kelamin (L/P)",
+		"Alamat",
+		"No Telepon",
 		"Tanggal Mulai Kerja (YYYY-MM-DD)",
+		"Tanggal Lahir (YYYY-MM-DD)",
+		"Tempat Lahir",
+		"No KTP",
+		"Agama",
+		"Status Pernikahan",
+		"Kebangsaan",
 	}
+
 	for i, h := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		if err := f.SetCellValue(sheet, cell, h); err != nil {
@@ -615,20 +1314,56 @@ func (s *Service) GenerateSatpamImportTemplate(ctx context.Context) ([]byte, err
 		}
 	}
 
+	// --------------------------------------------------
+	// Styles
+	// --------------------------------------------------
+	// Header style (existing helper)
 	_ = setPrettyHeaderStyle(f, sheet, len(headers))
+
+	// Date style: yyyy-mm-dd (Excel native)
+	dateStyle, err := f.NewStyle(&excelize.Style{
+		CustomNumFmt: &[]string{"yyyy-mm-dd"}[0],
+	})
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	// Apply DATE style to date columns
+	_ = f.SetCellStyle(sheet, "I2", "I500", dateStyle)
+	_ = f.SetCellStyle(sheet, "J2", "J500", dateStyle)
+
+	// Layout
 	_ = f.SetRowHeight(sheet, 1, 22)
-	_ = f.SetColWidth(sheet, "A", "D", 28)
+	_ = f.SetColWidth(sheet, "A", "N", 24)
 
-	// Example row (commented)
-	_ = f.SetCellValue(sheet, "A2", "#contoh (hapus baris ini)")
-	_ = f.SetCellValue(sheet, "B2", "satpam1@siaga.local")
-	_ = f.SetCellValue(sheet, "C2", "Password123")
-	_ = f.SetCellValue(sheet, "D2", "2025-01-01")
+	// --------------------------------------------------
+	// Data Validation (Prevent wrong input)
+	// --------------------------------------------------
+	// Date validation (I & J columns)
+	_ = f.AddDataValidation(sheet, &excelize.DataValidation{
+		Type:     "date",
+		Sqref:    "I2:I1048576",
+		Operator: "between",
+		Formula1: "DATE(1900,1,1)",
+		Formula2: "DATE(2100,12,31)",
+	})
 
+	_ = f.AddDataValidation(sheet, &excelize.DataValidation{
+		Type:     "date",
+		Sqref:    "J2:J1048576",
+		Operator: "between",
+		Formula1: "DATE(1900,1,1)",
+		Formula2: "DATE(2100,12,31)",
+	})
+
+	// --------------------------------------------------
+	// Export
+	// --------------------------------------------------
 	buf, err := f.WriteToBuffer()
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
+
 	return buf.Bytes(), nil
 }
 
@@ -687,7 +1422,18 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 		"Nama",
 		"Email",
 		"Password",
+		"Aktif (TRUE/FALSE)",
+		"Jabatan",
+		"Jenis Kelamin (L/P)",
+		"Alamat",
+		"No Telepon",
 		"Tanggal Mulai Kerja (YYYY-MM-DD)",
+		"Tanggal Lahir (YYYY-MM-DD)",
+		"Tempat Lahir",
+		"No KTP",
+		"Agama",
+		"Status Pernikahan",
+		"Kebangsaan",
 	}
 	header := rows[0]
 	if len(header) != len(expectedHeaders) {
@@ -700,11 +1446,8 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 	}
 
 	type rowData struct {
-		Name         string
-		Email        string
-		Password     string
-		WorkStart    time.Time
-		WorkStartStr string
+		Payload  *entities.SatpamUpsertPayload
+		Password string
 	}
 	var entries []rowData
 	emailRow := make(map[string]int)
@@ -712,7 +1455,6 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 	for idx, row := range rows[1:] {
 		rowNum := idx + 2
 
-		// normalize row to expected length
 		values := make([]string, len(expectedHeaders))
 		for i := 0; i < len(expectedHeaders); i++ {
 			if i < len(row) {
@@ -739,7 +1481,18 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 		name := values[0]
 		email := values[1]
 		password := values[2]
-		workStartStr := values[3]
+		activeStr := strings.ToUpper(values[3])
+		jabatan := values[4]
+		jenisKelamin := strings.ToUpper(values[5])
+		alamat := values[6]
+		noTelepon := values[7]
+		workStartStr := values[8]
+		tanggalLahirStr := values[9]
+		tempatLahirStr := values[10]
+		noKTPStr := values[11]
+		agamaStr := values[12]
+		statusNikahStr := values[13]
+		kebangsaanStr := values[14]
 
 		if name == "" {
 			return 0, responses.BadRequest(fmt.Errorf("row %d, column Nama: value is required", rowNum))
@@ -750,8 +1503,20 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 		if !strings.Contains(email, "@") {
 			return 0, responses.BadRequest(fmt.Errorf("row %d, column Email: invalid email format", rowNum))
 		}
-		if password == "" || len(password) < 6 {
-			return 0, responses.BadRequest(fmt.Errorf("row %d, column Password: minimum length is 6 characters", rowNum))
+		if password == "" || len(password) < 8 {
+			return 0, responses.BadRequest(fmt.Errorf("row %d, column Password: minimum length is 8 characters", rowNum))
+		}
+		if jabatan == "" {
+			return 0, responses.BadRequest(fmt.Errorf("row %d, column Jabatan: value is required", rowNum))
+		}
+		if jenisKelamin != "L" && jenisKelamin != "P" {
+			return 0, responses.BadRequest(fmt.Errorf("row %d, column Jenis Kelamin (L/P): value must be L or P", rowNum))
+		}
+		if alamat == "" {
+			return 0, responses.BadRequest(fmt.Errorf("row %d, column Alamat: value is required", rowNum))
+		}
+		if noTelepon == "" {
+			return 0, responses.BadRequest(fmt.Errorf("row %d, column No Telepon: value is required", rowNum))
 		}
 		if workStartStr == "" {
 			return 0, responses.BadRequest(fmt.Errorf("row %d, column Tanggal Mulai Kerja (YYYY-MM-DD): value is required", rowNum))
@@ -760,8 +1525,51 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 		if err != nil {
 			return 0, responses.BadRequest(fmt.Errorf("row %d, column Tanggal Mulai Kerja (YYYY-MM-DD): %v", rowNum, err))
 		}
-		// normalize to YYYY-MM-DD for DB insert
-		workStartStr = workStart.Format("2006-01-02")
+
+		var tanggalLahirPtr *time.Time
+		if tanggalLahirStr != "" {
+			d, err := parseFlexibleDate(tanggalLahirStr)
+			if err != nil {
+				return 0, responses.BadRequest(fmt.Errorf("row %d, column Tanggal Lahir (YYYY-MM-DD): %v", rowNum, err))
+			}
+			tanggalLahirPtr = &d
+		}
+
+		var tempatLahirPtr *string
+		if tempatLahirStr != "" {
+			v := tempatLahirStr
+			tempatLahirPtr = &v
+		}
+		var noKTPPtr *string
+		if noKTPStr != "" {
+			v := noKTPStr
+			noKTPPtr = &v
+		}
+		var agamaPtr *string
+		if agamaStr != "" {
+			v := agamaStr
+			agamaPtr = &v
+		}
+		var statusNikahPtr *string
+		if statusNikahStr != "" {
+			v := statusNikahStr
+			statusNikahPtr = &v
+		}
+		var kebangsaanPtr *string
+		if kebangsaanStr != "" {
+			v := kebangsaanStr
+			kebangsaanPtr = &v
+		}
+
+		isActive := true
+		if activeStr != "" {
+			switch activeStr {
+			case "FALSE", "0", "N", "NO":
+				isActive = false
+			default:
+				isActive = true
+			}
+		}
 
 		key := strings.ToLower(email)
 		if prevRow, ok := emailRow[key]; ok {
@@ -769,7 +1577,6 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 		}
 		emailRow[key] = rowNum
 
-		// check existing email in DB
 		var count int
 		if err := s.app.Ds.ReaderDB.GetContext(ctx, &count, `
 			SELECT COUNT(1) FROM users WHERE email = ?
@@ -780,12 +1587,26 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 			return 0, responses.BadRequest(fmt.Errorf("row %d, column Email: email already exists", rowNum))
 		}
 
+		payload := &entities.SatpamUpsertPayload{
+			Name:             name,
+			Email:            email,
+			Active:           isActive,
+			Jabatan:          jabatan,
+			JenisKelamin:     jenisKelamin,
+			TanggalLahir:     tanggalLahirPtr,
+			TempatLahir:      tempatLahirPtr,
+			NoKTP:            noKTPPtr,
+			Alamat:           alamat,
+			NoTelepon:        noTelepon,
+			Agama:            agamaPtr,
+			StatusPernikahan: statusNikahPtr,
+			Kebangsaan:       kebangsaanPtr,
+			WorkStartDate:    workStart,
+		}
+
 		entries = append(entries, rowData{
-			Name:         name,
-			Email:        email,
-			Password:     password,
-			WorkStart:    workStart,
-			WorkStartStr: workStartStr,
+			Payload:  payload,
+			Password: password,
 		})
 	}
 
@@ -808,15 +1629,32 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 			return 0, responses.InternalServerError(err)
 		}
 
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			INSERT INTO users (name, email, password_hash, role, work_start_date, active)
-			VALUES (?, ?, ?, 'SATPAM', ?, 1)
-		`, e.Name, e.Email, string(hash), e.WorkStartStr); err != nil {
+			VALUES (?, ?, ?, 'SATPAM', ?, ?)
+		`, e.Payload.Name, e.Payload.Email, string(hash), e.Payload.WorkStartDate.Format("2006-01-02"), e.Payload.Active)
+		if err != nil {
 			if responses.IsDuplicateErr(err) {
 				return 0, responses.BadRequest(fmt.Errorf("duplicate email detected during insert"))
 			}
 			return 0, responses.InternalServerError(err)
 		}
+		userID, err := res.LastInsertId()
+		if err != nil {
+			return 0, responses.InternalServerError(err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO satpam_profiles (
+				user_id, jabatan, jenis_kelamin, tanggal_lahir, tempat_lahir, no_ktp,
+				alamat, no_telepon, agama, status_pernikahan, kebangsaan, work_start_date
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, userID, e.Payload.Jabatan, e.Payload.JenisKelamin, e.Payload.TanggalLahir, e.Payload.TempatLahir,
+			e.Payload.NoKTP, e.Payload.Alamat, e.Payload.NoTelepon, e.Payload.Agama, e.Payload.StatusPernikahan,
+			e.Payload.Kebangsaan, e.Payload.WorkStartDate); err != nil {
+			return 0, responses.InternalServerError(err)
+		}
+
 		inserted++
 	}
 
@@ -825,6 +1663,573 @@ func (s *Service) ImportSatpamFromExcel(ctx context.Context, adminID int64, file
 	}
 
 	return inserted, nil
+}
+
+func (s *Service) GenerateSchedulingTemplate(ctx context.Context, month, year int) ([]byte, error) {
+	active := true
+	users, err := s.repo.ListSatpam(ctx, &active, 0, 0)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+
+	// Load shifts to build legend & allowed codes.
+	shifts, err := s.repo.ListShifts(ctx, 0, 0)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	shiftMetaByCode, allowedCodes := buildSchedulingShiftCodes(shifts)
+
+	loc := time.Now().Location()
+	firstDay := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc)
+	lastDay := firstDay.AddDate(0, 1, -1).Day()
+
+	f := excelize.NewFile()
+	sheet := f.GetSheetName(f.GetActiveSheetIndex())
+
+	// Title
+	title := "SECURITY SIAGA"
+	_ = f.SetCellValue(sheet, "A1", title)
+	lastColIdx := 3 + lastDay
+	lastColCell, _ := excelize.CoordinatesToCellName(lastColIdx, 1)
+	_ = f.MergeCell(sheet, "A1", lastColCell)
+
+	// Subtitle, e.g. Jan-26
+	monthNames := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+	monthLabel := "???"
+	if month >= 1 && month <= 12 {
+		monthLabel = monthNames[month-1]
+	}
+	subtitle := fmt.Sprintf("%s-%02d", monthLabel, year%100)
+	_ = f.SetCellValue(sheet, "A2", subtitle)
+	subtitleCell, _ := excelize.CoordinatesToCellName(lastColIdx, 2)
+	_ = f.MergeCell(sheet, "A2", subtitleCell)
+
+	// Table header rows
+	headerRow1 := 4
+	headerRow2 := 5
+
+	// Header row 1: NO | NAMA | JABATAN | 1..N
+	_ = f.SetCellValue(sheet, "A4", "NO")
+	_ = f.SetCellValue(sheet, "B4", "NAMA")
+	_ = f.SetCellValue(sheet, "C4", "JABATAN")
+	// Merge NO/NAMA/JABATAN header cells vertically with weekday row.
+	_ = f.MergeCell(sheet, "A4", "A5")
+	_ = f.MergeCell(sheet, "B4", "B5")
+	_ = f.MergeCell(sheet, "C4", "C5")
+
+	// Column widths: narrow for day columns, wider for labels.
+	_ = f.SetColWidth(sheet, "A", "A", 4)   // NO
+	_ = f.SetColWidth(sheet, "B", "B", 18)  // NAMA
+	_ = f.SetColWidth(sheet, "C", "C", 12)  // JABATAN
+	for d := 1; d <= lastDay; d++ {
+		colIdx := 3 + d
+		cell, _ := excelize.CoordinatesToCellName(colIdx, headerRow1)
+		_ = f.SetCellInt(sheet, cell, d)
+	}
+
+	// Set narrow width for all day columns (approx 23px).
+	startDayColName, _ := excelize.ColumnNumberToName(4)
+	endDayColName, _ := excelize.ColumnNumberToName(lastColIdx)
+	_ = f.SetColWidth(sheet, startDayColName, endDayColName, 3.0)
+
+	// Header row 2: weekday initials
+	for d := 1; d <= lastDay; d++ {
+		date := time.Date(year, time.Month(month), d, 0, 0, 0, 0, loc)
+		var initial string
+		switch date.Weekday() {
+		case time.Monday:
+			initial = "S" // Senin
+		case time.Tuesday:
+			initial = "S" // Selasa
+		case time.Wednesday:
+			initial = "R"
+		case time.Thursday:
+			initial = "K"
+		case time.Friday:
+			initial = "J"
+		case time.Saturday:
+			initial = "S"
+		case time.Sunday:
+			initial = "M"
+		default:
+			initial = ""
+		}
+		colIdx := 3 + d
+		cell, _ := excelize.CoordinatesToCellName(colIdx, headerRow2)
+		_ = f.SetCellValue(sheet, cell, initial)
+
+		// Minggu: red background
+		if date.Weekday() == time.Sunday {
+			style, _ := f.NewStyle(&excelize.Style{
+				Fill: excelize.Fill{
+					Type:    "pattern",
+					Color:   []string{"#FB5E5A"},
+					Pattern: 1,
+				},
+			})
+			_ = f.SetCellStyle(sheet, cell, cell, style)
+		}
+	}
+
+	// Common borders for table cells.
+	commonBorders := []excelize.Border{
+		{Type: "left", Color: "000000", Style: 1},
+		{Type: "right", Color: "000000", Style: 1},
+		{Type: "top", Color: "000000", Style: 1},
+		{Type: "bottom", Color: "000000", Style: 1},
+	}
+
+	// Header styles
+	// Left labels (NO/NAMA/JABATAN) with shaded background.
+	labelHeaderStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{
+			Bold: true,
+		},
+		Fill: excelize.Fill{
+			Type:    "pattern",
+			Color:   []string{"#FDCD01"}, // yellow
+			Pattern: 1,
+		},
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+		Border: commonBorders,
+	})
+	_ = f.SetCellStyle(sheet, "A4", "C5", labelHeaderStyle)
+
+	// Day & weekday headers (columns D..)
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{
+			Bold: true,
+		},
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+		Border: commonBorders,
+	})
+	headerStartCell1, _ := excelize.CoordinatesToCellName(4, headerRow1)
+	headerEndCell1, _ := excelize.CoordinatesToCellName(lastColIdx, headerRow1)
+	headerStartCell2, _ := excelize.CoordinatesToCellName(4, headerRow2)
+	headerEndCell2, _ := excelize.CoordinatesToCellName(lastColIdx, headerRow2)
+	_ = f.SetCellStyle(sheet, headerStartCell1, headerEndCell1, headerStyle)
+	_ = f.SetCellStyle(sheet, headerStartCell2, headerEndCell2, headerStyle)
+
+	// Sunday date numbers in row 4 colored red (font + background).
+	sundayDateStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{
+			Bold:  true,
+			Color: "FFFF0000",
+		},
+		Fill: excelize.Fill{
+			Type:    "pattern",
+			Color:   []string{"#FB5E5A"},
+			Pattern: 1,
+		},
+		Border: commonBorders,
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+	})
+	for d := 1; d <= lastDay; d++ {
+		date := time.Date(year, time.Month(month), d, 0, 0, 0, 0, loc)
+		if date.Weekday() == time.Sunday {
+			colIdx := 3 + d
+			cell, _ := excelize.CoordinatesToCellName(colIdx, headerRow1)
+			_ = f.SetCellStyle(sheet, cell, cell, sundayDateStyle)
+		}
+	}
+
+	// Sunday weekday initials (row 5) with red font on red background.
+	sundayWeekdayStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{
+			Bold:  true,
+			Color: "FFFF0000",
+		},
+		Fill: excelize.Fill{
+			Type:    "pattern",
+			Color:   []string{"#FB5E5A"},
+			Pattern: 1,
+		},
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+		Border: commonBorders,
+	})
+	for d := 1; d <= lastDay; d++ {
+		date := time.Date(year, time.Month(month), d, 0, 0, 0, 0, loc)
+		if date.Weekday() == time.Sunday {
+			colIdx := 3 + d
+			cell, _ := excelize.CoordinatesToCellName(colIdx, headerRow2)
+			_ = f.SetCellStyle(sheet, cell, cell, sundayWeekdayStyle)
+		}
+	}
+
+	// Data rows
+	startRow := 6
+	row := startRow
+	for i, u := range users {
+		noCell, _ := excelize.CoordinatesToCellName(1, row)
+		nameCell, _ := excelize.CoordinatesToCellName(2, row)
+		roleCell, _ := excelize.CoordinatesToCellName(3, row)
+		_ = f.SetCellInt(sheet, noCell, i+1)
+		_ = f.SetCellValue(sheet, nameCell, u.Name)
+		_ = f.SetCellValue(sheet, roleCell, u.Jabatan)
+		row++
+	}
+	lastDataRow := row - 1
+
+	// Borders & alignment for data rows only
+	dataStartCell, _ := excelize.CoordinatesToCellName(1, startRow)
+	dataEndCell, _ := excelize.CoordinatesToCellName(lastColIdx, lastDataRow)
+	dataStyle, _ := f.NewStyle(&excelize.Style{
+		Border: commonBorders,
+		Alignment: &excelize.Alignment{
+			Horizontal: "center",
+			Vertical:   "center",
+		},
+	})
+	_ = f.SetCellStyle(sheet, dataStartCell, dataEndCell, dataStyle)
+
+	// Conditional formatting: X => red background.
+	dayStartColCell, _ := excelize.CoordinatesToCellName(4, startRow)
+	dayEndColCell, _ := excelize.CoordinatesToCellName(lastColIdx, lastDataRow)
+	condStyleID, _ := f.NewConditionalStyle(&excelize.Style{
+		Fill: excelize.Fill{
+			Type:    "pattern",
+			Color:   []string{"#FB5E5A"},
+			Pattern: 1,
+		},
+	})
+	rangeRef := fmt.Sprintf("%s:%s", dayStartColCell, dayEndColCell)
+	_ = f.SetConditionalFormat(sheet, rangeRef, []excelize.ConditionalFormatOptions{
+		{
+			Type:     "cell",
+			Criteria: "==",
+			Format:   &condStyleID,
+			Value:    "\"X\"",
+		},
+	})
+
+	// Data validation: only allow codes defined in legend (empty allowed).
+	if len(allowedCodes) > 0 {
+		promptTitle := "Kode shift"
+		prompt := fmt.Sprintf("Gunakan salah satu dari: %s", strings.Join(allowedCodes, ", "))
+		errorStyle := "stop"
+		errorTitle := "Kode shift tidak valid"
+		errorMsg := fmt.Sprintf("Hanya boleh: %s", strings.Join(allowedCodes, ", "))
+
+		listFormula := fmt.Sprintf("\"%s\"", strings.Join(allowedCodes, ","))
+		_ = f.AddDataValidation(sheet, &excelize.DataValidation{
+			Type:             "list",
+			Sqref:            rangeRef,
+			AllowBlank:       true,
+			ShowInputMessage: true,
+			PromptTitle:      &promptTitle,
+			Prompt:           &prompt,
+			ShowErrorMessage: true,
+			ErrorStyle:       &errorStyle,
+			ErrorTitle:       &errorTitle,
+			Error:            &errorMsg,
+			Formula1:         listFormula,
+		})
+	}
+
+	// Legend from shifts (KET / JAM KERJA)
+	legendStartRow := lastDataRow + 2
+	_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", legendStartRow), "KET")
+	_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", legendStartRow), "JAM KERJA")
+
+	legendRow := legendStartRow + 1
+	for _, code := range allowedCodes {
+		meta, ok := shiftMetaByCode[code]
+		if !ok {
+			continue
+		}
+		_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", legendRow), code)
+
+		label := "LIBUR"
+		if !strings.EqualFold(meta.Name, "Libur") {
+			formatTime := func(t string) string {
+				if len(t) >= 5 {
+					s := t[:5]
+					return strings.ReplaceAll(s, ":", ".")
+				}
+				return t
+			}
+			label = fmt.Sprintf("%s - %s", formatTime(meta.Start), formatTime(meta.End))
+		}
+		_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", legendRow), label)
+		legendRow++
+	}
+
+	_ = f.SetRowHeight(sheet, 1, 22)
+
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (s *Service) ImportSchedulingFromExcel(ctx context.Context, adminID int64, fileData []byte) (*entities.SchedulingImportResult, error) {
+	_ = adminID
+
+	f, err := excelize.OpenReader(bytes.NewReader(fileData))
+	if err != nil {
+		return nil, responses.BadRequest(errors.New("invalid Excel file"))
+	}
+	sheet := f.GetSheetName(f.GetActiveSheetIndex())
+
+	// Subtitle in A2: Jan-26
+	subtitle, err := f.GetCellValue(sheet, "A2")
+	if err != nil || strings.TrimSpace(subtitle) == "" {
+		return nil, responses.BadRequest(errors.New("subtitle (month-year) is missing at A2"))
+	}
+	t, err := time.Parse("Jan-06", strings.TrimSpace(subtitle))
+	if err != nil {
+		return nil, responses.BadRequest(errors.New("invalid subtitle format, expected Mon-YY (e.g. Jan-26)"))
+	}
+	year := t.Year()
+	month := int(t.Month())
+	loc := time.Now().Location()
+	firstDay := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc)
+	lastDay := firstDay.AddDate(0, 1, -1).Day()
+
+	rows, err := f.GetRows(sheet)
+	if err != nil {
+		return nil, responses.BadRequest(errors.New("failed to read Excel rows"))
+	}
+	if len(rows) < 6 {
+		return nil, responses.BadRequest(errors.New("template must include header and data rows"))
+	}
+
+	headerRowIdx := 3 // row 4 (0-based index)
+	headerRow := rows[headerRowIdx]
+	if len(headerRow) < 3+lastDay {
+		return nil, responses.BadRequest(errors.New("invalid header row in template"))
+	}
+
+	// Map day column index -> day number.
+	type dayCol struct {
+		ColIdx int
+		Day    int
+	}
+	var dayCols []dayCol
+	for col := 3; col < 3+lastDay; col++ {
+		if col >= len(headerRow) {
+			break
+		}
+		val := strings.TrimSpace(headerRow[col])
+		if val == "" {
+			continue
+		}
+		d, err := strconv.Atoi(val)
+		if err != nil {
+			return nil, responses.BadRequest(fmt.Errorf("invalid day value in header at column %d", col+1))
+		}
+		dayCols = append(dayCols, dayCol{ColIdx: col + 1, Day: d})
+	}
+
+	// Build satpam name -> userID map.
+	allSatpam, err := s.repo.ListSatpam(ctx, nil, 0, 0)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	nameToID := make(map[string]int64)
+	for _, u := range allSatpam {
+		key := strings.ToUpper(strings.TrimSpace(u.Name))
+		if key == "" {
+			continue
+		}
+		if _, exists := nameToID[key]; !exists {
+			nameToID[key] = u.ID
+		}
+	}
+
+	// Shift mapping (dynamic, based on current shifts / legend).
+	shifts, err := s.repo.ListShifts(ctx, 0, 0)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	shiftMetaByCode, allowedCodes := buildSchedulingShiftCodes(shifts)
+	allowedCodesStr := strings.Join(allowedCodes, ",")
+
+	result := &entities.SchedulingImportResult{
+		Errors: make([]entities.SchedulingImportError, 0),
+	}
+
+	// Data starts from row 6 (index 5).
+	for rowIdx := 5; rowIdx < len(rows); rowIdx++ {
+		excelRow := rowIdx + 1
+		row := rows[rowIdx]
+
+		// Jika menjumpai baris kosong pertama di bawah data, anggap sebagai akhir data.
+		if len(row) == 0 {
+			break
+		}
+
+		// Column A berisi nomor urut (1,2,3,...) untuk baris satpam.
+		// Jika sudah tidak numeric (mis. "KET", "X", dll.) atau kosong, anggap akhir data dan stop loop.
+		var noStr string
+		if len(row) > 0 {
+			noStr = strings.TrimSpace(row[0])
+		}
+		if noStr == "" {
+			break
+		}
+		if _, err := strconv.Atoi(noStr); err != nil {
+			break
+		}
+
+		// NAMA at column B (index 1)
+		var name string
+		if len(row) > 1 {
+			name = strings.TrimSpace(row[1])
+		}
+		if name == "" {
+			// assume end of data
+			continue
+		}
+
+		result.ProcessedRows++
+
+		userID, ok := nameToID[strings.ToUpper(name)]
+		if !ok {
+			result.Errors = append(result.Errors, entities.SchedulingImportError{
+				SatpamName: name,
+				Date:       "",
+				Value:      "",
+				Reason:     "satpam name not found",
+			})
+			result.Skipped++
+			continue
+		}
+
+		for _, dc := range dayCols {
+			// Read value via GetCellValue to include blanks.
+			cellRef, _ := excelize.CoordinatesToCellName(dc.ColIdx, excelRow)
+			val, _ := f.GetCellValue(sheet, cellRef)
+			code := strings.ToUpper(strings.TrimSpace(val))
+			if code == "" {
+				continue
+			}
+
+			result.ProcessedCells++
+
+			meta, ok := shiftMetaByCode[code]
+			if !ok {
+				result.Errors = append(result.Errors, entities.SchedulingImportError{
+					SatpamName: name,
+					Date:       time.Date(year, time.Month(month), dc.Day, 0, 0, 0, 0, loc).Format("2006-01-02"),
+					Value:      code,
+					Reason:     fmt.Sprintf("invalid shift code (allowed: %s)", allowedCodesStr),
+				})
+				result.Skipped++
+				continue
+			}
+
+			shiftDate := time.Date(year, time.Month(month), dc.Day, 0, 0, 0, 0, loc)
+			inserted, updated, err := s.repo.UpsertUserShift(ctx, userID, meta.ID, shiftDate)
+			if err != nil {
+				result.Errors = append(result.Errors, entities.SchedulingImportError{
+					SatpamName: name,
+					Date:       shiftDate.Format("2006-01-02"),
+					Value:      code,
+					Reason:     err.Error(),
+				})
+				result.Skipped++
+				continue
+			}
+			if inserted {
+				result.Inserted++
+			} else if updated {
+				result.Updated++
+			} else {
+				result.Skipped++
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// schedulingShiftMeta describes a shift with its generated code for scheduling template/import.
+type schedulingShiftMeta struct {
+	ID    int64
+	Name  string
+	Start string
+	End   string
+}
+
+// buildSchedulingShiftCodes builds a stable mapping from shift names to short codes:
+// - "Pagi"  -> "P"
+// - "Siang" -> "S"
+// - "Malam" -> "M"
+// - "Libur" -> "X"
+// - other shift names get generated codes A-Z that are not used yet.
+// Returns:
+// - map[code]*meta
+// - slice of codes (in stable order) for validation/legend.
+func buildSchedulingShiftCodes(shifts []*entities.Shift) (map[string]*schedulingShiftMeta, []string) {
+	reserved := map[string]string{
+		"Pagi":  "P",
+		"Siang": "S",
+		"Malam": "M",
+		"Libur": "X",
+	}
+
+	used := map[string]bool{}
+
+	// Sort shifts by name for deterministic codes.
+	sort.Slice(shifts, func(i, j int) bool {
+		return strings.ToLower(strings.TrimSpace(shifts[i].Name)) < strings.ToLower(strings.TrimSpace(shifts[j].Name))
+	})
+
+	metaByCode := make(map[string]*schedulingShiftMeta)
+	codes := make([]string, 0, len(shifts))
+
+	nextCode := func() string {
+		for ch := 'A'; ch <= 'Z'; ch++ {
+			c := string(ch)
+			if !used[c] {
+				return c
+			}
+		}
+		return "?" // fallback
+	}
+
+	for _, sft := range shifts {
+		name := strings.TrimSpace(sft.Name)
+		if name == "" {
+			continue
+		}
+
+		code, ok := reserved[name]
+		if !ok {
+			code = nextCode()
+		}
+
+		// Mark code as used and register meta.
+		used[code] = true
+		if _, exists := metaByCode[code]; exists {
+			continue
+		}
+
+		meta := &schedulingShiftMeta{
+			ID:    sft.ID,
+			Name:  name,
+			Start: sft.StartTime,
+			End:   sft.EndTime,
+		}
+		metaByCode[code] = meta
+		codes = append(codes, code)
+	}
+
+	return metaByCode, codes
 }
 
 func (s *Service) ImportShiftsFromExcel(ctx context.Context, adminID int64, fileData []byte) (int, error) {
@@ -969,15 +2374,25 @@ func (s *Service) ExportSatpamToExcel(ctx context.Context) ([]byte, error) {
 		return nil, responses.InternalServerError(err)
 	}
 
+	now := time.Now()
+
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(f.GetActiveSheetIndex())
 
 	headers := []string{
 		"Nama",
-		"Email",
+		"Jabatan",
+		"Jenis Kelamin",
+		"Tanggal Lahir",
+		"Tempat Lahir",
+		"No. KTP",
+		"Alamat",
+		"No. Telepon",
+		"Agama",
+		"Status Pernikahan",
+		"Kebangsaan",
 		"Tanggal Mulai Kerja",
 		"Lama Bekerja",
-		"Aktif",
 	}
 	for i, h := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
@@ -988,45 +2403,91 @@ func (s *Service) ExportSatpamToExcel(ctx context.Context) ([]byte, error) {
 
 	_ = setPrettyHeaderStyle(f, sheet, len(headers))
 	_ = f.SetRowHeight(sheet, 1, 22)
-	_ = f.SetColWidth(sheet, "A", "E", 24)
-
-	today := time.Now()
-	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+	_ = f.SetColWidth(sheet, "A", "M", 28)
 
 	rowIdx := 2
 	for _, u := range users {
-		var workStartStr string
+		// Gender label
+		genderLabel := ""
+		switch strings.ToUpper(u.JenisKelamin) {
+		case "L":
+			genderLabel = "Laki-laki"
+		case "P":
+			genderLabel = "Perempuan"
+		default:
+			genderLabel = u.JenisKelamin
+		}
+
+		var tglLahirStr string
+		if u.TanggalLahir != nil {
+			tglLahirStr = u.TanggalLahir.Format("2006-01-02")
+		}
+
+		var tempatLahir string
+		if u.TempatLahir != nil {
+			tempatLahir = *u.TempatLahir
+		}
+
+		var noKTP string
+		if u.NoKTP != nil {
+			noKTP = *u.NoKTP
+		}
+		var agama string
+		if u.Agama != nil {
+			agama = *u.Agama
+		}
+		var statusNikah string
+		if u.StatusPernikahan != nil {
+			statusNikah = *u.StatusPernikahan
+		}
+		var kebangsaan string
+		if u.Kebangsaan != nil {
+			kebangsaan = *u.Kebangsaan
+		}
+
+		workStartStr := u.WorkStartDate.Format("2006-01-02")
+
+		// Hitung lama bekerja dalam tahun & bulan (dibulatkan ke bawah).
+		years := now.Year() - u.WorkStartDate.Year()
+		months := int(now.Month()) - int(u.WorkStartDate.Month())
+		if now.Day() < u.WorkStartDate.Day() {
+			months--
+		}
+		if months < 0 {
+			years--
+			months += 12
+		}
+		if years < 0 {
+			years = 0
+		}
+		if months < 0 {
+			months = 0
+		}
+
 		var lamaBekerja string
-
-		if u.WorkStartDate != nil {
-			wd := time.Date(u.WorkStartDate.Year(), u.WorkStartDate.Month(), u.WorkStartDate.Day(), 0, 0, 0, 0, u.WorkStartDate.Location())
-			workStartStr = wd.Format("2006-01-02")
-
-			if !wd.After(today) {
-				totalDays := int(today.Sub(wd).Hours() / 24)
-				years := totalDays / 365
-				months := (totalDays % 365) / 30
-				parts := []string{}
-				if years > 0 {
-					parts = append(parts, fmt.Sprintf("%d tahun", years))
-				}
-				if months > 0 {
-					parts = append(parts, fmt.Sprintf("%d bulan", months))
-				}
-				if len(parts) == 0 {
-					lamaBekerja = "0 bulan"
-				} else {
-					lamaBekerja = strings.Join(parts, " ")
-				}
-			}
+		switch {
+		case years > 0 && months > 0:
+			lamaBekerja = fmt.Sprintf("%d tahun %d bulan", years, months)
+		case years > 0:
+			lamaBekerja = fmt.Sprintf("%d tahun", years)
+		default:
+			lamaBekerja = fmt.Sprintf("%d bulan", months)
 		}
 
 		row := []interface{}{
 			u.Name,
-			u.Email,
+			u.Jabatan,
+			genderLabel,
+			tglLahirStr,
+			tempatLahir,
+			noKTP,
+			u.Alamat,
+			u.NoTelepon,
+			agama,
+			statusNikah,
+			kebangsaan,
 			workStartStr,
 			lamaBekerja,
-			u.Active,
 		}
 		cell, _ := excelize.CoordinatesToCellName(1, rowIdx)
 		if err := f.SetSheetRow(sheet, cell, &row); err != nil {
@@ -1049,6 +2510,7 @@ func (s *Service) ExportAttendanceMonitoringToExcel(ctx context.Context, startDa
 
 	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, startDate.Location())
 	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, endDate.Location())
+	today := time.Now().Truncate(24 * time.Hour)
 
 	users, err := s.repo.ListSatpam(ctx, nil, 0, 0)
 	if err != nil {
@@ -1111,7 +2573,7 @@ func (s *Service) ExportAttendanceMonitoringToExcel(ctx context.Context, startDa
 		}
 
 		for _, u := range users {
-			if u.WorkStartDate != nil {
+			if !u.WorkStartDate.IsZero() {
 				ws := time.Date(u.WorkStartDate.Year(), u.WorkStartDate.Month(), u.WorkStartDate.Day(), 0, 0, 0, 0, u.WorkStartDate.Location())
 				if ws.After(d) {
 					continue
@@ -1206,7 +2668,13 @@ func (s *Service) ExportAttendanceMonitoringToExcel(ctx context.Context, startDa
 							shiftEndStr = info.End
 						}
 					}
-					statusKehadiran = "TIDAK_ABSEN"
+					// Jika tanggal shift sudah lewat (<= hari ini) dan tidak ada absensi -> TIDAK_ABSEN.
+					// Jika tanggal di depan hari ini -> BELUM_ABSEN (belum terjadi).
+					if !d.After(today) {
+						statusKehadiran = "TIDAK_ABSEN"
+					} else {
+						statusKehadiran = "BELUM_ABSEN"
+					}
 				}
 			}
 

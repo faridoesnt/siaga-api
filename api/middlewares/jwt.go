@@ -66,10 +66,22 @@ func JWT(secret []byte, ttl time.Duration) fiber.Handler {
 			return forbidden(c, "user inactive")
 		}
 
+		// Load permissions for RBAC (admin users only for now).
+		var perms []string
+		if err := app.Ds.ReaderDB.SelectContext(context.Background(), &perms, `
+			SELECT permission_code
+			FROM user_permissions
+			WHERE user_id = ?
+			ORDER BY permission_code ASC
+		`, user.ID); err != nil && err != sql.ErrNoRows {
+			return internalError(c)
+		}
+
 		c.Locals("user_id", user.ID)
 		c.Locals("user_name", user.Name)
 		c.Locals("user_email", user.Email)
 		c.Locals("user_role", user.Role)
+		c.Locals("permissions", perms)
 		c.Locals("user", &user)
 
 		// Renew access token and send back via header for the client to update.
@@ -100,6 +112,46 @@ func RequireRole(allowed ...string) fiber.Handler {
 		}
 		return forbidden(c, "forbidden")
 	}
+}
+
+// RequirePermissions ensures the current user has all of the given permission codes.
+// For *_VIEW codes, the corresponding *_MANAGE code is also accepted.
+func RequirePermissions(codes ...string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		raw := c.Locals("permissions")
+		perms, _ := raw.([]string)
+		for _, code := range codes {
+			if !hasPermission(perms, code) {
+				return forbidden(c, "forbidden")
+			}
+		}
+		return c.Next()
+	}
+}
+
+// HasPermission exposes permission check for handlers.
+func HasPermission(c *fiber.Ctx, code string) bool {
+	raw := c.Locals("permissions")
+	perms, _ := raw.([]string)
+	return hasPermission(perms, code)
+}
+
+func hasPermission(perms []string, code string) bool {
+	for _, p := range perms {
+		if p == code {
+			return true
+		}
+	}
+	if strings.HasSuffix(code, "_VIEW") {
+		prefix := strings.TrimSuffix(code, "_VIEW")
+		manage := prefix + "_MANAGE"
+		for _, p := range perms {
+			if p == manage {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func unauthorized(c *fiber.Ctx, message string) error {
