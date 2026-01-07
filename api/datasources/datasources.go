@@ -59,7 +59,9 @@ func parseDs(config map[string]string) (dsWriter, dsReader string) {
 	pass := config[constants.DbPass]
 	name := config[constants.DbName]
 
-	params := "?parseTime=true&loc=Local"
+	// Force Asia/Jakarta for all time parsing so DATETIME values
+	// are consistently treated as WIB across services.
+	params := "?parseTime=true&loc=Asia%2FJakarta"
 	dsWriter = fmt.Sprintf("%s:%s@(%s:%s)/%s%s", user, pass, hostWriter, port, name, params)
 	dsReader = fmt.Sprintf("%s:%s@(%s:%s)/%s%s", user, pass, hostReader, port, name, params)
 
