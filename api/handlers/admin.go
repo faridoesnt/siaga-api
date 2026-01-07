@@ -1349,7 +1349,10 @@ func AdminListDailyAttendance(c *fiber.Ctx) error {
 				"name": r.UserName,
 			},
 			"shift": fiber.Map{
-				"name": r.ShiftName,
+				"name":                 r.ShiftName,
+				"start_time":           r.ShiftStart,
+				"end_time":             r.ShiftEnd,
+				"late_tolerance_minute": r.LateTolerance,
 			},
 			"clock_in_time":       r.ClockInTime,
 			"clock_out_time":      r.ClockOutTime,
