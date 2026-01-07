@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,26 @@ type Service struct {
 	repo       Repository
 	faceClient face.Client
 	faceBypass bool
+}
+
+var wibLocation *time.Location
+
+func init() {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		// fallback to fixed +7 zone if load fails
+		log.Printf("failed to load Asia/Jakarta location, fallback to +7: %v", err)
+		wibLocation = time.FixedZone("WIB", 7*60*60)
+	} else {
+		wibLocation = loc
+	}
+}
+
+func nowInWIB() time.Time {
+	if wibLocation == nil {
+		return time.Now()
+	}
+	return time.Now().In(wibLocation)
 }
 
 func Init(app *contracts.App) contracts.SatpamService {
@@ -242,7 +263,7 @@ func (s *Service) ListAttendanceHistory(ctx context.Context, userID int64, start
 }
 
 func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, imageBase64 string) (*entities.Attendance, error) {
-	now := time.Now()
+	now := nowInWIB()
 	dateOnly := now.Truncate(24 * time.Hour)
 
 	// RULE 1: block if there is any open attendance
@@ -379,7 +400,7 @@ func (s *Service) ClockOut(ctx context.Context, userID int64, lat, lng float64) 
 }
 
 func (s *Service) ClockOutWithPhoto(ctx context.Context, userID int64, lat, lng float64, photoURL *string, imageBase64 string) (*entities.Attendance, error) {
-	now := time.Now()
+	now := nowInWIB()
 	if strings.TrimSpace(imageBase64) == "" {
 		return nil, responses.BadRequest(errors.New("image is required"))
 	}
@@ -467,7 +488,7 @@ func (s *Service) ClockOutWithPhoto(ctx context.Context, userID int64, lat, lng 
 
 func (s *Service) CreateActivityPhoto(ctx context.Context, userID, attendanceID int64, note string, photoURL string, takenAt time.Time, lat, lng float64) (*entities.DailyActivityPhoto, error) {
 	// validate attendance belongs to user and is today
-	now := time.Now()
+	now := nowInWIB()
 	dateOnly := now.Truncate(24 * time.Hour)
 
 	att, err := s.repo.GetAttendanceByIDForUserAndDate(ctx, userID, attendanceID, dateOnly)
@@ -525,7 +546,7 @@ func (s *Service) CreateActivityPhoto(ctx context.Context, userID, attendanceID 
 
 func (s *Service) CreateShiftSwapRequest(ctx context.Context, userID, targetUserID int64, shiftDate time.Time, reason string) (*entities.ShiftSwapRequest, error) {
 	dateOnly := shiftDate.Truncate(24 * time.Hour)
-	now := time.Now()
+	now := nowInWIB()
 	today := now.Truncate(24 * time.Hour)
 	if dateOnly.Before(today) {
 		return nil, responses.BadRequest(errors.New("shift_date must be today or later"))
