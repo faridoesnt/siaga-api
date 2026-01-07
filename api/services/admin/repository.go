@@ -698,6 +698,8 @@ func (r *repository) ListShiftSwapRequests(ctx context.Context, status string, l
 			ssr.target_user_id,
 			ru.name AS requester_name,
 			tu.name AS target_name,
+			rs.name AS requester_shift_name,
+			ts.name AS target_shift_name,
 			ssr.shift_date,
 			ssr.requester_user_shift_id,
 			ssr.target_user_shift_id,
@@ -711,6 +713,10 @@ func (r *repository) ListShiftSwapRequests(ctx context.Context, status string, l
 		FROM shift_swap_requests ssr
 		INNER JOIN users ru ON ru.id = ssr.requester_user_id
 		INNER JOIN users tu ON tu.id = ssr.target_user_id
+		LEFT JOIN user_shifts rus ON rus.id = ssr.requester_user_shift_id
+		LEFT JOIN shifts rs ON rs.id = rus.shift_id
+		LEFT JOIN user_shifts tus ON tus.id = ssr.target_user_shift_id
+		LEFT JOIN shifts ts ON ts.id = tus.shift_id
 		WHERE 1=1
 	`
 	if status != "" {

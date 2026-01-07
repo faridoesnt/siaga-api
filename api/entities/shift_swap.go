@@ -16,6 +16,8 @@ type ShiftSwapRequest struct {
 	TargetUserID          int64            `db:"target_user_id" json:"target_user_id"`
 	RequesterName         *string          `db:"requester_name" json:"requester_name,omitempty"`
 	TargetName            *string          `db:"target_name" json:"target_name,omitempty"`
+	RequesterShiftName    *string          `db:"requester_shift_name" json:"requester_shift_name,omitempty"`
+	TargetShiftName       *string          `db:"target_shift_name" json:"target_shift_name,omitempty"`
 	ShiftDate             time.Time        `db:"shift_date" json:"shift_date"`
 	RequesterUserShiftID  int64            `db:"requester_user_shift_id" json:"requester_user_shift_id"`
 	TargetUserShiftID     int64            `db:"target_user_shift_id" json:"target_user_shift_id"`
