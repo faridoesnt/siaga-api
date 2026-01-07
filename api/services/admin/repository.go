@@ -996,7 +996,14 @@ func (r *repository) GetDashboardDiscipline(ctx context.Context, startDate, endD
 			COALESCE(SUM(
 				CASE WHEN us.shift_date <= CURDATE()
 					AND a.clock_out_time IS NOT NULL AND a.clock_in_time IS NOT NULL
-					AND TIMESTAMP(a.attendance_date, s.end_time) > a.clock_out_time
+					AND (
+						CASE
+							-- Shift lintas hari (mis. 20:00-08:00): jam selesai di hari berikutnya.
+							WHEN s.end_time < s.start_time THEN TIMESTAMP(DATE_ADD(us.shift_date, INTERVAL 1 DAY), s.end_time)
+							-- Shift normal (di hari yang sama).
+							ELSE TIMESTAMP(us.shift_date, s.end_time)
+						END
+					) > a.clock_out_time
 				THEN 1 ELSE 0 END
 			), 0) AS early_leave,
 			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NOT NULL AND a.clock_in_time IS NULL THEN 1 ELSE 0 END), 0) AS no_checkin,
