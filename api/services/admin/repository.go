@@ -121,22 +121,23 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 	}
 
 	var row struct {
-		ID              int64      `db:"id"`
-		Name            string     `db:"name"`
-		Email           string     `db:"email"`
-		Role            string     `db:"role"`
-		Active          bool       `db:"active"`
-		Jabatan         string     `db:"jabatan"`
-		JenisKelamin    string     `db:"jenis_kelamin"`
-		TanggalLahir    *time.Time `db:"tanggal_lahir"`
-		TempatLahir     *string    `db:"tempat_lahir"`
-		NoKTP           *string    `db:"no_ktp"`
-		Alamat          string     `db:"alamat"`
-		NoTelepon       string     `db:"no_telepon"`
-		Agama           *string    `db:"agama"`
-		StatusPernikahan *string   `db:"status_pernikahan"`
-		Kebangsaan      *string    `db:"kebangsaan"`
-		WorkStartDate   time.Time  `db:"work_start_date"`
+		ID               int64      `db:"id"`
+		Name             string     `db:"name"`
+		Email            string     `db:"email"`
+		Role             string     `db:"role"`
+		Active           bool       `db:"active"`
+		Jabatan          string     `db:"jabatan"`
+		JenisKelamin     string     `db:"jenis_kelamin"`
+		TanggalLahir     *time.Time `db:"tanggal_lahir"`
+		TempatLahir      *string    `db:"tempat_lahir"`
+		NoKTP            *string    `db:"no_ktp"`
+		Alamat           string     `db:"alamat"`
+		NoTelepon        string     `db:"no_telepon"`
+		Agama            *string    `db:"agama"`
+		StatusPernikahan *string    `db:"status_pernikahan"`
+		Kebangsaan       *string    `db:"kebangsaan"`
+		WorkStartDate    time.Time  `db:"work_start_date"`
+		FaceCount        int        `db:"face_count"`
 	}
 
 	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
@@ -144,7 +145,8 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date
+			p.work_start_date,
+			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
 		WHERE u.id = ?
@@ -153,11 +155,13 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 	}
 
 	return &entities.SatpamWithProfile{
-		ID:               row.ID,
-		Name:             row.Name,
-		Email:            row.Email,
-		Role:             row.Role,
-		Active:           row.Active,
+		ID:           row.ID,
+		Name:         row.Name,
+		Email:        row.Email,
+		Role:         row.Role,
+		Active:       row.Active,
+		FaceEnrolled: row.FaceCount > 0,
+
 		Jabatan:          row.Jabatan,
 		JenisKelamin:     row.JenisKelamin,
 		TanggalLahir:     row.TanggalLahir,
@@ -179,7 +183,8 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date
+			p.work_start_date,
+			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
 		WHERE u.role = ?
@@ -204,22 +209,23 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 	}
 
 	var rows []struct {
-		ID              int64      `db:"id"`
-		Name            string     `db:"name"`
-		Email           string     `db:"email"`
-		Role            string     `db:"role"`
-		Active          bool       `db:"active"`
-		Jabatan         string     `db:"jabatan"`
-		JenisKelamin    string     `db:"jenis_kelamin"`
-		TanggalLahir    *time.Time `db:"tanggal_lahir"`
-		TempatLahir     *string    `db:"tempat_lahir"`
-		NoKTP           *string    `db:"no_ktp"`
-		Alamat          string     `db:"alamat"`
-		NoTelepon       string     `db:"no_telepon"`
-		Agama           *string    `db:"agama"`
-		StatusPernikahan *string   `db:"status_pernikahan"`
-		Kebangsaan      *string    `db:"kebangsaan"`
-		WorkStartDate   time.Time  `db:"work_start_date"`
+		ID               int64      `db:"id"`
+		Name             string     `db:"name"`
+		Email            string     `db:"email"`
+		Role             string     `db:"role"`
+		Active           bool       `db:"active"`
+		Jabatan          string     `db:"jabatan"`
+		JenisKelamin     string     `db:"jenis_kelamin"`
+		TanggalLahir     *time.Time `db:"tanggal_lahir"`
+		TempatLahir      *string    `db:"tempat_lahir"`
+		NoKTP            *string    `db:"no_ktp"`
+		Alamat           string     `db:"alamat"`
+		NoTelepon        string     `db:"no_telepon"`
+		Agama            *string    `db:"agama"`
+		StatusPernikahan *string    `db:"status_pernikahan"`
+		Kebangsaan       *string    `db:"kebangsaan"`
+		WorkStartDate    time.Time  `db:"work_start_date"`
+		FaceCount        int        `db:"face_count"`
 	}
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
 		return nil, err
@@ -227,11 +233,13 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 	result := make([]*entities.SatpamWithProfile, 0, len(rows))
 	for _, rrow := range rows {
 		result = append(result, &entities.SatpamWithProfile{
-			ID:               rrow.ID,
-			Name:             rrow.Name,
-			Email:            rrow.Email,
-			Role:             rrow.Role,
-			Active:           rrow.Active,
+			ID:           rrow.ID,
+			Name:         rrow.Name,
+			Email:        rrow.Email,
+			Role:         rrow.Role,
+			Active:       rrow.Active,
+			FaceEnrolled: rrow.FaceCount > 0,
+
 			Jabatan:          rrow.Jabatan,
 			JenisKelamin:     rrow.JenisKelamin,
 			TanggalLahir:     rrow.TanggalLahir,
@@ -322,22 +330,23 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 	}
 
 	var row struct {
-		ID              int64      `db:"id"`
-		Name            string     `db:"name"`
-		Email           string     `db:"email"`
-		Role            string     `db:"role"`
-		Active          bool       `db:"active"`
-		Jabatan         string     `db:"jabatan"`
-		JenisKelamin    string     `db:"jenis_kelamin"`
-		TanggalLahir    *time.Time `db:"tanggal_lahir"`
-		TempatLahir     *string    `db:"tempat_lahir"`
-		NoKTP           *string    `db:"no_ktp"`
-		Alamat          string     `db:"alamat"`
-		NoTelepon       string     `db:"no_telepon"`
-		Agama           *string    `db:"agama"`
-		StatusPernikahan *string   `db:"status_pernikahan"`
-		Kebangsaan      *string    `db:"kebangsaan"`
-		WorkStartDate   time.Time  `db:"work_start_date"`
+		ID               int64      `db:"id"`
+		Name             string     `db:"name"`
+		Email            string     `db:"email"`
+		Role             string     `db:"role"`
+		Active           bool       `db:"active"`
+		Jabatan          string     `db:"jabatan"`
+		JenisKelamin     string     `db:"jenis_kelamin"`
+		TanggalLahir     *time.Time `db:"tanggal_lahir"`
+		TempatLahir      *string    `db:"tempat_lahir"`
+		NoKTP            *string    `db:"no_ktp"`
+		Alamat           string     `db:"alamat"`
+		NoTelepon        string     `db:"no_telepon"`
+		Agama            *string    `db:"agama"`
+		StatusPernikahan *string    `db:"status_pernikahan"`
+		Kebangsaan       *string    `db:"kebangsaan"`
+		WorkStartDate    time.Time  `db:"work_start_date"`
+		FaceCount        int        `db:"face_count"`
 	}
 
 	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
@@ -345,7 +354,8 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date
+			p.work_start_date,
+			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
 		WHERE u.id = ? AND u.role = 'SATPAM'
@@ -357,11 +367,13 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 	}
 
 	return &entities.SatpamWithProfile{
-		ID:               row.ID,
-		Name:             row.Name,
-		Email:            row.Email,
-		Role:             row.Role,
-		Active:           row.Active,
+		ID:           row.ID,
+		Name:         row.Name,
+		Email:        row.Email,
+		Role:         row.Role,
+		Active:       row.Active,
+		FaceEnrolled: row.FaceCount > 0,
+
 		Jabatan:          row.Jabatan,
 		JenisKelamin:     row.JenisKelamin,
 		TanggalLahir:     row.TanggalLahir,

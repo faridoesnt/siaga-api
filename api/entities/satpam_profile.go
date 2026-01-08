@@ -40,11 +40,12 @@ type SatpamUpsertPayload struct {
 
 // SatpamWithProfile is used in admin APIs to return combined account + profile data.
 type SatpamWithProfile struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
-	Active   bool   `json:"is_active"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	Active       bool   `json:"is_active"`
+	FaceEnrolled bool   `json:"face_enrolled"`
 
 	Jabatan         string     `json:"jabatan"`
 	JenisKelamin    string     `json:"jenis_kelamin"`
