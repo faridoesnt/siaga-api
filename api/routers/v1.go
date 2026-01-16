@@ -76,6 +76,7 @@ func Init(app *contracts.App) {
 	adminGroup.Get("/export/attendance-monitoring", middlewares.RequirePermissions("ATTENDANCE_MONITORING_VIEW"), handlers.AdminExportAttendanceMonitoring)
 	adminGroup.Get("/scheduling/template", middlewares.RequirePermissions("SCHEDULING_MANAGE"), handlers.AdminDownloadSchedulingTemplate)
 	adminGroup.Post("/scheduling/import", middlewares.RequirePermissions("SCHEDULING_MANAGE"), handlers.AdminImportScheduling)
+	adminGroup.Post("/reports/attendance/export", middlewares.RequirePermissions("DASHBOARD_VIEW"), handlers.AdminExportAttendanceReport)
 
 	// Permissions listing (for admin management)
 	adminGroup.Get("/permissions", middlewares.RequirePermissions("ADMIN_VIEW"), handlers.AdminListPermissions)

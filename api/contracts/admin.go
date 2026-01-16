@@ -55,6 +55,8 @@ type AdminService interface {
 	ImportShiftsFromExcel(ctx context.Context, adminID int64, fileData []byte) (int, error)
 	ExportSatpamToExcel(ctx context.Context) ([]byte, error)
 	ExportAttendanceMonitoringToExcel(ctx context.Context, startDate, endDate time.Time) ([]byte, error)
+	GenerateAttendanceReportXLSX(ctx context.Context, startDate, endDate time.Time) ([]byte, error)
+	GenerateAttendanceReportPDF(ctx context.Context, startDate, endDate time.Time) ([]byte, error)
 
 	// Scheduling template (monthly)
 	GenerateSchedulingTemplate(ctx context.Context, month, year int) ([]byte, error)

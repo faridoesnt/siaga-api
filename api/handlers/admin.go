@@ -229,6 +229,86 @@ func AdminExportAttendanceMonitoring(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).Send(data)
 }
 
+type attendanceReportExportRequest struct {
+	DateFrom string `json:"date_from"`
+	DateTo   string `json:"date_to"`
+	Format   string `json:"format"`
+}
+
+// AdminExportAttendanceReport generates an attendance executive report (PDF or XLSX)
+// for a given date range. It reuses existing dashboard and attendance monitoring
+// aggregation logic; no business rules are changed here.
+func AdminExportAttendanceReport(c *fiber.Ctx) error {
+	_, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	var req attendanceReportExportRequest
+	if err := c.BodyParser(&req); err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid request body")))
+	}
+
+	req.DateFrom = strings.TrimSpace(req.DateFrom)
+	req.DateTo = strings.TrimSpace(req.DateTo)
+	if req.DateFrom == "" || req.DateTo == "" {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("date_from and date_to are required")))
+	}
+
+	start, err := time.Parse("2006-01-02", req.DateFrom)
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid date_from format, expected YYYY-MM-DD")))
+	}
+	end, err := time.Parse("2006-01-02", req.DateTo)
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid date_to format, expected YYYY-MM-DD")))
+	}
+	if end.Before(start) {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("date_to must be on or after date_from")))
+	}
+
+	// Maximum range: 92 days (inclusive).
+	const maxRangeDays = 92
+	diffDays := int(end.Sub(start).Hours()/24) + 1
+	if diffDays > maxRangeDays {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("maximum allowed range is %d days", maxRangeDays)))
+	}
+
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format != "pdf" && format != "xlsx" {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("format must be 'pdf' or 'xlsx'")))
+	}
+
+	startToken := start.Format("20060102")
+	endToken := end.Format("20060102")
+
+	switch format {
+	case "xlsx":
+		data, err := app.Services.Admin.GenerateAttendanceReportXLSX(c.Context(), start, end)
+		if err != nil {
+			return HttpError(c, err)
+		}
+		filename := fmt.Sprintf("attendance-report-%s-%s.xlsx", startToken, endToken)
+		c.Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		c.Set("Content-Length", strconv.Itoa(len(data)))
+		return c.Status(fiber.StatusOK).Send(data)
+	case "pdf":
+		data, err := app.Services.Admin.GenerateAttendanceReportPDF(c.Context(), start, end)
+		if err != nil {
+			return HttpError(c, err)
+		}
+		filename := fmt.Sprintf("attendance-report-%s-%s.pdf", startToken, endToken)
+		c.Set("Content-Type", "application/pdf")
+		c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		c.Set("Content-Length", strconv.Itoa(len(data)))
+		return c.Status(fiber.StatusOK).Send(data)
+	default:
+		// Should not happen due to validation above.
+		return HttpError(c, responses.BadRequest(fmt.Errorf("unsupported format")))
+	}
+}
+
 func AdminDownloadSchedulingTemplate(c *fiber.Ctx) error {
 	_, err := getAdminID(c)
 	if err != nil {
