@@ -148,23 +148,36 @@ func renderTrendChartPNG(data *attendanceReportData) ([]byte, error) {
 	present := []float64{}
 	late := []float64{}
 	absent := []float64{}
-	notYet := []float64{}
+	upcoming := []float64{}
 
 	for _, t := range data.Trend {
 		xValues = append(xValues, t.Date)
 		present = append(present, float64(t.Present))
 		late = append(late, float64(t.Late))
 		absent = append(absent, float64(t.Absent))
-		notYet = append(notYet, float64(t.NotYet))
+		upcoming = append(upcoming, float64(t.NotYet))
 	}
 
-	if len(xValues) == 0 {
+	// go-chart requires at least 2 different x-values; otherwise it fails with
+	// "zero x-range delta". This happens when the selected date range only
+	// contains a single day. To keep the chart rendering stable we:
+	//   - if there is no data at all, synthesize a single zero point at "now"
+	//   - if there is exactly one point, clone it at +24h so the x-range > 0
+	switch len(xValues) {
+	case 0:
 		now := time.Now()
 		xValues = append(xValues, now)
 		present = append(present, 0)
 		late = append(late, 0)
 		absent = append(absent, 0)
-		notYet = append(notYet, 0)
+		upcoming = append(upcoming, 0)
+	case 1:
+		cloneTime := xValues[0].Add(24 * time.Hour)
+		xValues = append(xValues, cloneTime)
+		present = append(present, present[0])
+		late = append(late, late[0])
+		absent = append(absent, absent[0])
+		upcoming = append(upcoming, upcoming[0])
 	}
 
 	graph := chart.Chart{
@@ -207,7 +220,7 @@ func renderTrendChartPNG(data *attendanceReportData) ([]byte, error) {
 			chart.TimeSeries{
 				Name:    "Upcoming",
 				XValues: xValues,
-				YValues: notYet,
+				YValues: upcoming,
 				Style: chart.Style{
 					StrokeColor: chart.ColorBlue,
 				},

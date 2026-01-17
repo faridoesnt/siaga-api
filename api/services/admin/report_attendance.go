@@ -10,6 +10,7 @@ import (
 	"siaga-api/api/entities"
 	"siaga-api/api/models/responses"
 
+	zero "github.com/rs/zerolog/log"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -69,9 +70,21 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 		return nil, responses.BadRequest(fmt.Errorf("date_to must be on or after date_from"))
 	}
 
-	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, startDate.Location())
-	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, endDate.Location())
-	today := time.Now().Truncate(24 * time.Hour)
+	// Normalize to date-only boundaries in local time, keeping the same
+	// calendar days that the caller provided.
+	loc := time.Local
+	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, loc)
+	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, loc)
+	nowLocal := time.Now().In(loc)
+	today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc)
+
+	zero.Info().
+		Str("Context", "buildAttendanceReportData").
+		Time("param_start", startDate).
+		Time("param_end", endDate).
+		Time("normalized_start", start).
+		Time("normalized_end", end).
+		Msg("attendance report date range")
 
 	// Executive summary (reuse dashboard summary logic).
 	summaryRow, err := s.repo.GetDashboardSummary(ctx, start, end)
@@ -104,16 +117,34 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 		return nil, responses.InternalServerError(err)
 	}
 	var trend []attendanceReportTrendRow
+	var trendMin, trendMax *time.Time
 	for _, r := range trendRows {
-		dayDate, err := time.ParseInLocation("2006-01-02", r.Date, today.Location())
+		dayDate, err := time.ParseInLocation("2006-01-02", r.Date, loc)
 		if err != nil {
 			if t2, err2 := time.Parse(time.RFC3339, r.Date); err2 == nil {
-				dayDate = t2
+				dayDate = t2.In(loc)
 			} else {
 				dayDate = today
 			}
 		}
-		dayDate = dayDate.Truncate(24 * time.Hour)
+		// Normalize any time-of-day component to midnight local time so that
+		// comparisons and grouping are purely date-based.
+		dayDate = time.Date(dayDate.Year(), dayDate.Month(), dayDate.Day(), 0, 0, 0, 0, loc)
+
+		// Defensive guard: ensure we never include days outside the requested
+		// range even if the underlying query or data has anomalies.
+		if dayDate.Before(start) || dayDate.After(end) {
+			continue
+		}
+
+		if trendMin == nil || dayDate.Before(*trendMin) {
+			tmp := dayDate
+			trendMin = &tmp
+		}
+		if trendMax == nil || dayDate.After(*trendMax) {
+			tmp := dayDate
+			trendMax = &tmp
+		}
 
 		row := attendanceReportTrendRow{
 			Date:      dayDate,
@@ -134,6 +165,23 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 		}
 		trend = append(trend, row)
 	}
+
+	zero.Info().
+		Str("Context", "buildAttendanceReportData").
+		Int("trend_count", len(trend)).
+		Time("trend_min", func() time.Time {
+			if trendMin != nil {
+				return *trendMin
+			}
+			return time.Time{}
+		}()).
+		Time("trend_max", func() time.Time {
+			if trendMax != nil {
+				return *trendMax
+			}
+			return time.Time{}
+		}()).
+		Msg("attendance report trend bounds")
 
 	// Discipline breakdown.
 	discRow, err := s.repo.GetDashboardDiscipline(ctx, start, end)
@@ -367,7 +415,7 @@ func (s *Service) GenerateAttendanceReportXLSX(ctx context.Context, startDate, e
 	_ = f.SetColWidth(summarySheet, "A", "B", 24)
 
 	// Trend sheet
-	trendHeaders := []string{"Date", "Present", "Late", "Absent", "Not yet checked-in"}
+	trendHeaders := []string{"Date", "Present", "Late", "Absent", "Upcoming"}
 	for i, h := range trendHeaders {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		_ = f.SetCellValue(trendSheet, cell, h)
@@ -422,7 +470,7 @@ func (s *Service) GenerateAttendanceReportXLSX(ctx context.Context, startDate, e
 	addBreakdownRow("Early leave", data.Breakdown.EarlyLeave)
 	addBreakdownRow("No check-in", data.Breakdown.NoCheckin)
 	addBreakdownRow("Missed shift", data.Breakdown.MissedShift)
-	addBreakdownRow("Not yet checked-in (future shift)", data.Breakdown.FutureShift)
+	addBreakdownRow("Upcoming shifts", data.Breakdown.FutureShift)
 	_ = f.SetColWidth(breakdownSheet, "A", "C", 30)
 	_ = f.SetPanes(breakdownSheet, &excelize.Panes{
 		Freeze:      true,

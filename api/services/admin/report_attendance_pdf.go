@@ -56,7 +56,10 @@ func (s *Service) GenerateAttendanceReportPDF(ctx context.Context, startDate, en
 
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetTextColor(107, 114, 128) // gray
-	pdf.CellFormat(0, 5, formatDateRangeWithEmDash(data.Summary.DateFrom, data.Summary.DateTo), "", 1, "L", false, 0, "")
+	// Use the raw start/end dates passed into the service to reflect exactly
+	// what the admin selected in the UI, independent of any internal
+	// normalization.
+	pdf.CellFormat(0, 5, formatDateRangeWithEmDash(startDate, endDate), "", 1, "L", false, 0, "")
 	pdf.CellFormat(0, 5, fmt.Sprintf("Generated at: %s",
 		data.Summary.GeneratedAt.Format("2006-01-02 15:04"),
 	), "", 1, "L", false, 0, "")
@@ -116,8 +119,25 @@ func (s *Service) GenerateAttendanceReportPDF(ctx context.Context, startDate, en
 			Err(err).Msg("")
 	}
 
-	// New page for breakdown + top risk.
-	pdf.AddPage()
+	// Compact attendance trend table (same concept as Excel "Trend (Daily)" sheet).
+	pdf.Ln(4)
+	renderTrendTable(pdf, data.Trend)
+	// Decide if we need a new page before Discipline Breakdown based on remaining space.
+	{
+		_, pageHeight := pdf.GetPageSize()
+		_, _, _, _ = pdf.GetMargins()
+		autoBreak, bottomMargin := pdf.GetAutoPageBreak()
+		if !autoBreak {
+			// Fallback margin when auto-break is disabled.
+			bottomMargin = 10
+		}
+		bottomLimit := pageHeight - bottomMargin
+		// Approximate required height for donut + legend + spacing (in mm).
+		required := 90.0
+		if pdf.GetY()+required > bottomLimit {
+			pdf.AddPage()
+		}
+	}
 
 	// Discipline breakdown section
 	addSectionDivider(pdf)
@@ -239,6 +259,28 @@ func renderSimpleTable(pdf *gofpdf.Fpdf, headers []string, rows [][]string) {
 		pdf.Ln(-1)
 		fill = !fill
 	}
+}
+
+// renderTrendTable renders a small daily attendance trend table underneath
+// the trend chart. It mirrors the Excel "Trend (Daily)" sheet structure.
+func renderTrendTable(pdf *gofpdf.Fpdf, trend []attendanceReportTrendRow) {
+	if len(trend) == 0 {
+		return
+	}
+
+	headers := []string{"Date", "Present", "Late", "Absent", "Upcoming"}
+	rows := make([][]string, 0, len(trend))
+	for _, t := range trend {
+		rows = append(rows, []string{
+			t.Date.Format("2006-01-02"),
+			fmt.Sprintf("%d", t.Present),
+			fmt.Sprintf("%d", t.Late),
+			fmt.Sprintf("%d", t.Absent),
+			fmt.Sprintf("%d", t.NotYet),
+		})
+	}
+
+	renderSimpleTable(pdf, headers, rows)
 }
 
 // tableCol describes a column in a PDF table.
