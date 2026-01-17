@@ -14,6 +14,8 @@ type AdminService interface {
 	UpdateSatpam(ctx context.Context, adminID, userID int64, payload *entities.SatpamUpsertPayload) (*entities.SatpamWithProfile, error)
 	DeleteSatpam(ctx context.Context, adminID, userID int64) error
 	ResetSatpamPassword(ctx context.Context, adminID, userID int64, newPassword string) error
+	UpdateSatpamProfilePhoto(ctx context.Context, adminID, userID int64, photoURL string) (*entities.SatpamWithProfile, error)
+	UpdateSatpamKTPPhoto(ctx context.Context, adminID, userID int64, photoURL string) (*entities.SatpamWithProfile, error)
 
 	CreateAttendanceSpot(ctx context.Context, name string, latitude, longitude float64, radiusMeters int) (*entities.AttendanceSpot, error)
 	ListAttendanceSpots(ctx context.Context, limit, offset int) ([]*entities.AttendanceSpot, error)

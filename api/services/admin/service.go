@@ -105,6 +105,36 @@ func (s *Service) ListSatpam(ctx context.Context, active *bool, limit, offset in
 	return users, nil
 }
 
+func (s *Service) UpdateSatpamProfilePhoto(ctx context.Context, adminID, userID int64, photoURL string) (*entities.SatpamWithProfile, error) {
+	_ = adminID // reserved for future auditing
+	if strings.TrimSpace(photoURL) == "" {
+		return nil, responses.BadRequest(errors.New("photo_url is required"))
+	}
+	user, err := s.repo.UpdateSatpamPhotoFields(ctx, userID, &photoURL, nil)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	if user == nil {
+		return nil, responses.NotFound(errors.New("satpam not found"))
+	}
+	return user, nil
+}
+
+func (s *Service) UpdateSatpamKTPPhoto(ctx context.Context, adminID, userID int64, photoURL string) (*entities.SatpamWithProfile, error) {
+	_ = adminID // reserved for future auditing
+	if strings.TrimSpace(photoURL) == "" {
+		return nil, responses.BadRequest(errors.New("photo_url is required"))
+	}
+	user, err := s.repo.UpdateSatpamPhotoFields(ctx, userID, nil, &photoURL)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	if user == nil {
+		return nil, responses.NotFound(errors.New("satpam not found"))
+	}
+	return user, nil
+}
+
 // RBAC / Permissions
 
 func (s *Service) ListPermissions(ctx context.Context) ([]*entities.Permission, error) {

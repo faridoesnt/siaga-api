@@ -3,11 +3,14 @@ package handlers
 import (
 	"fmt"
 	"io"
+	"mime/multipart"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"siaga-api/api/constants"
 	"siaga-api/api/entities"
 	"siaga-api/api/models/responses"
 
@@ -909,6 +912,111 @@ func AdminResetSatpamPassword(c *fiber.Ctx) error {
 	return HttpSuccess(c, fiber.Map{
 		"id": userID,
 	})
+}
+
+// AdminUploadSatpamPhoto handles upload of security profile photo.
+func AdminUploadSatpamPhoto(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || userID <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	fileHeader, err := c.FormFile("photo")
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("photo is required")))
+	}
+	if err := validatePhotoFile(fileHeader); err != nil {
+		return HttpError(c, responses.BadRequest(err))
+	}
+
+	basePath := app.Config[constants.StoragePath]
+	if basePath == "" {
+		basePath = "./storage"
+	}
+
+	now := time.Now()
+	dir := filepath.Join(basePath, "satpam", fmt.Sprintf("%d", userID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return HttpError(c, responses.InternalServerError(err))
+	}
+
+	filename := buildSatpamStoredFilename(fileHeader, "profile", now)
+	fullPath := filepath.Join(dir, filename)
+	if err := c.SaveFile(fileHeader, fullPath); err != nil {
+		return HttpError(c, responses.InternalServerError(err))
+	}
+
+	photoURL := fmt.Sprintf("/static/satpam/%d/%s", userID, filename)
+
+	user, err := app.Services.Admin.UpdateSatpamProfilePhoto(c.Context(), adminID, userID, photoURL)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, user)
+}
+
+// AdminUploadSatpamKTPPhoto handles upload of security ID card photo.
+func AdminUploadSatpamKTPPhoto(c *fiber.Ctx) error {
+	adminID, err := getAdminID(c)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	idStr := c.Params("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || userID <= 0 {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("invalid id")))
+	}
+
+	fileHeader, err := c.FormFile("photo")
+	if err != nil {
+		return HttpError(c, responses.BadRequest(fmt.Errorf("photo is required")))
+	}
+	if err := validatePhotoFile(fileHeader); err != nil {
+		return HttpError(c, responses.BadRequest(err))
+	}
+
+	basePath := app.Config[constants.StoragePath]
+	if basePath == "" {
+		basePath = "./storage"
+	}
+
+	now := time.Now()
+	dir := filepath.Join(basePath, "satpam", fmt.Sprintf("%d", userID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return HttpError(c, responses.InternalServerError(err))
+	}
+
+	filename := buildSatpamStoredFilename(fileHeader, "ktp", now)
+	fullPath := filepath.Join(dir, filename)
+	if err := c.SaveFile(fileHeader, fullPath); err != nil {
+		return HttpError(c, responses.InternalServerError(err))
+	}
+
+	photoURL := fmt.Sprintf("/static/satpam/%d/%s", userID, filename)
+
+	user, err := app.Services.Admin.UpdateSatpamKTPPhoto(c.Context(), adminID, userID, photoURL)
+	if err != nil {
+		return HttpError(c, err)
+	}
+
+	return HttpSuccess(c, user)
+}
+
+// buildSatpamStoredFilename builds a stored filename for satpam photos.
+func buildSatpamStoredFilename(file *multipart.FileHeader, prefix string, now time.Time) string {
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if ext == "" {
+		ext = ".jpg"
+	}
+	return fmt.Sprintf("%s-%d%s", prefix, now.UnixNano(), ext)
 }
 
 // 6) ATTENDANCE SPOTS

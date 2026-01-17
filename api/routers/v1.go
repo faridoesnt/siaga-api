@@ -95,6 +95,8 @@ func Init(app *contracts.App) {
 	adminGroup.Patch("/satpam/:id", middlewares.RequirePermissions("SATPAM_MANAGE"), handlers.AdminUpdateSatpam)
 	adminGroup.Delete("/satpam/:id", middlewares.RequirePermissions("SATPAM_MANAGE"), handlers.AdminDeleteSatpam)
 	adminGroup.Post("/satpam/:id/reset-password", middlewares.RequirePermissions("SATPAM_MANAGE"), handlers.AdminResetSatpamPassword)
+	adminGroup.Post("/satpam/:id/photo", middlewares.RequirePermissions("SATPAM_MANAGE"), handlers.AdminUploadSatpamPhoto)
+	adminGroup.Post("/satpam/:id/ktp-photo", middlewares.RequirePermissions("SATPAM_MANAGE"), handlers.AdminUploadSatpamKTPPhoto)
 
 	adminGroup.Post("/attendance-spots", middlewares.RequirePermissions("ATTENDANCE_SPOT_MANAGE"), handlers.AdminCreateAttendanceSpot)
 	adminGroup.Get("/attendance-spots", middlewares.RequirePermissions("ATTENDANCE_SPOT_VIEW"), handlers.AdminListAttendanceSpots)

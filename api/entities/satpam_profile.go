@@ -16,6 +16,8 @@ type SatpamProfile struct {
 	StatusPernikahan *string   `db:"status_pernikahan" json:"status_pernikahan,omitempty"`
 	Kebangsaan      *string    `db:"kebangsaan" json:"kebangsaan,omitempty"`
 	WorkStartDate   time.Time  `db:"work_start_date" json:"work_start_date"`
+	PhotoURL        *string    `db:"photo_url" json:"photo_url,omitempty"`
+	KTPPhotoURL     *string    `db:"ktp_photo_url" json:"ktp_photo_url,omitempty"`
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
 }
@@ -36,6 +38,8 @@ type SatpamUpsertPayload struct {
 	StatusPernikahan *string   `json:"status_pernikahan,omitempty"`
 	Kebangsaan      *string    `json:"kebangsaan,omitempty"`
 	WorkStartDate   time.Time  `json:"work_start_date"`
+	PhotoURL        *string    `json:"photo_url,omitempty"`
+	KTPPhotoURL     *string    `json:"ktp_photo_url,omitempty"`
 }
 
 // SatpamWithProfile is used in admin APIs to return combined account + profile data.
@@ -58,4 +62,6 @@ type SatpamWithProfile struct {
 	StatusPernikahan *string   `json:"status_pernikahan,omitempty"`
 	Kebangsaan      *string    `json:"kebangsaan,omitempty"`
 	WorkStartDate   time.Time  `json:"work_start_date"`
+	PhotoURL        *string    `json:"photo_url,omitempty"`
+	KTPPhotoURL     *string    `json:"ktp_photo_url,omitempty"`
 }

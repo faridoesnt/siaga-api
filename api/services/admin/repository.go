@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"siaga-api/api/contracts"
@@ -18,6 +19,7 @@ type Repository interface {
 	SetSatpamActive(ctx context.Context, userID int64, active bool) error
 	UpdateSatpam(ctx context.Context, userID int64, payload *entities.SatpamUpsertPayload) (*entities.SatpamWithProfile, error)
 	DeleteSatpam(ctx context.Context, userID int64) error
+	UpdateSatpamPhotoFields(ctx context.Context, userID int64, photoURL, ktpPhotoURL *string) (*entities.SatpamWithProfile, error)
 
 	// Attendance spots
 	CreateAttendanceSpot(ctx context.Context, name string, latitude, longitude float64, radiusMeters int) (*entities.AttendanceSpot, error)
@@ -108,10 +110,12 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO satpam_profiles (
 			user_id, jabatan, jenis_kelamin, tanggal_lahir, tempat_lahir, no_ktp,
-			alamat, no_telepon, agama, status_pernikahan, kebangsaan, work_start_date
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			alamat, no_telepon, agama, status_pernikahan, kebangsaan, work_start_date,
+			photo_url, ktp_photo_url
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, userID, payload.Jabatan, payload.JenisKelamin, payload.TanggalLahir, payload.TempatLahir, payload.NoKTP,
-		payload.Alamat, payload.NoTelepon, payload.Agama, payload.StatusPernikahan, payload.Kebangsaan, payload.WorkStartDate)
+		payload.Alamat, payload.NoTelepon, payload.Agama, payload.StatusPernikahan, payload.Kebangsaan, payload.WorkStartDate,
+		payload.PhotoURL, payload.KTPPhotoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +141,8 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 		StatusPernikahan *string    `db:"status_pernikahan"`
 		Kebangsaan       *string    `db:"kebangsaan"`
 		WorkStartDate    time.Time  `db:"work_start_date"`
+		PhotoURL         *string    `db:"photo_url"`
+		KTPPhotoURL      *string    `db:"ktp_photo_url"`
 		FaceCount        int        `db:"face_count"`
 	}
 
@@ -145,7 +151,7 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date,
+			p.work_start_date, p.photo_url, p.ktp_photo_url,
 			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
@@ -173,6 +179,8 @@ func (r *repository) CreateSatpam(ctx context.Context, payload *entities.SatpamU
 		StatusPernikahan: row.StatusPernikahan,
 		Kebangsaan:       row.Kebangsaan,
 		WorkStartDate:    row.WorkStartDate,
+		PhotoURL:         row.PhotoURL,
+		KTPPhotoURL:      row.KTPPhotoURL,
 	}, nil
 }
 
@@ -183,7 +191,7 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date,
+			p.work_start_date, p.photo_url, p.ktp_photo_url,
 			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
@@ -225,6 +233,8 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 		StatusPernikahan *string    `db:"status_pernikahan"`
 		Kebangsaan       *string    `db:"kebangsaan"`
 		WorkStartDate    time.Time  `db:"work_start_date"`
+		PhotoURL         *string    `db:"photo_url"`
+		KTPPhotoURL      *string    `db:"ktp_photo_url"`
 		FaceCount        int        `db:"face_count"`
 	}
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, query, args...); err != nil {
@@ -251,6 +261,8 @@ func (r *repository) ListSatpam(ctx context.Context, active *bool, limit, offset
 			StatusPernikahan: rrow.StatusPernikahan,
 			Kebangsaan:       rrow.Kebangsaan,
 			WorkStartDate:    rrow.WorkStartDate,
+			PhotoURL:         rrow.PhotoURL,
+			KTPPhotoURL:      rrow.KTPPhotoURL,
 		})
 	}
 	return result, nil
@@ -346,6 +358,8 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 		StatusPernikahan *string    `db:"status_pernikahan"`
 		Kebangsaan       *string    `db:"kebangsaan"`
 		WorkStartDate    time.Time  `db:"work_start_date"`
+		PhotoURL         *string    `db:"photo_url"`
+		KTPPhotoURL      *string    `db:"ktp_photo_url"`
 		FaceCount        int        `db:"face_count"`
 	}
 
@@ -354,7 +368,7 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 			u.id, u.name, u.email, u.role, u.active,
 			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
 			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
-			p.work_start_date,
+			p.work_start_date, p.photo_url, p.ktp_photo_url,
 			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
 		FROM users u
 		INNER JOIN satpam_profiles p ON p.user_id = u.id
@@ -385,6 +399,104 @@ func (r *repository) UpdateSatpam(ctx context.Context, userID int64, payload *en
 		StatusPernikahan: row.StatusPernikahan,
 		Kebangsaan:       row.Kebangsaan,
 		WorkStartDate:    row.WorkStartDate,
+		PhotoURL:         row.PhotoURL,
+		KTPPhotoURL:      row.KTPPhotoURL,
+	}, nil
+}
+
+// UpdateSatpamPhotoFields updates one or both photo URL fields for a satpam
+// profile and returns the refreshed combined view.
+func (r *repository) UpdateSatpamPhotoFields(ctx context.Context, userID int64, photoURL, ktpPhotoURL *string) (*entities.SatpamWithProfile, error) {
+	// Build dynamic SET part only for non-nil fields.
+	setParts := []string{}
+	args := []interface{}{}
+	if photoURL != nil {
+		setParts = append(setParts, "photo_url = ?")
+		args = append(args, *photoURL)
+	}
+	if ktpPhotoURL != nil {
+		setParts = append(setParts, "ktp_photo_url = ?")
+		args = append(args, *ktpPhotoURL)
+	}
+	if len(setParts) == 0 {
+		// Nothing to update, just return current row.
+	}
+
+	if len(setParts) > 0 {
+		query := `
+			UPDATE satpam_profiles
+			SET ` + strings.Join(setParts, ", ") + `,
+			    updated_at = NOW()
+			WHERE user_id = ?
+		`
+		args = append(args, userID)
+
+		if _, err := r.app.Ds.WriterDB.ExecContext(ctx, query, args...); err != nil {
+			return nil, err
+		}
+	}
+
+	// Reuse the same SELECT as in UpdateSatpam to return combined data.
+	var row struct {
+		ID               int64      `db:"id"`
+		Name             string     `db:"name"`
+		Email            string     `db:"email"`
+		Role             string     `db:"role"`
+		Active           bool       `db:"active"`
+		Jabatan          string     `db:"jabatan"`
+		JenisKelamin     string     `db:"jenis_kelamin"`
+		TanggalLahir     *time.Time `db:"tanggal_lahir"`
+		TempatLahir      *string    `db:"tempat_lahir"`
+		NoKTP            *string    `db:"no_ktp"`
+		Alamat           string     `db:"alamat"`
+		NoTelepon        string     `db:"no_telepon"`
+		Agama            *string    `db:"agama"`
+		StatusPernikahan *string    `db:"status_pernikahan"`
+		Kebangsaan       *string    `db:"kebangsaan"`
+		WorkStartDate    time.Time  `db:"work_start_date"`
+		PhotoURL         *string    `db:"photo_url"`
+		KTPPhotoURL      *string    `db:"ktp_photo_url"`
+		FaceCount        int        `db:"face_count"`
+	}
+
+	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
+		SELECT
+			u.id, u.name, u.email, u.role, u.active,
+			p.jabatan, p.jenis_kelamin, p.tanggal_lahir, p.tempat_lahir, p.no_ktp,
+			p.alamat, p.no_telepon, p.agama, p.status_pernikahan, p.kebangsaan,
+			p.work_start_date, p.photo_url, p.ktp_photo_url,
+			(SELECT COUNT(*) FROM face_embeddings fe WHERE fe.user_id = u.id) AS face_count
+		FROM users u
+		INNER JOIN satpam_profiles p ON p.user_id = u.id
+		WHERE u.id = ? AND u.role = 'SATPAM'
+	`, userID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &entities.SatpamWithProfile{
+		ID:           row.ID,
+		Name:         row.Name,
+		Email:        row.Email,
+		Role:         row.Role,
+		Active:       row.Active,
+		FaceEnrolled: row.FaceCount > 0,
+
+		Jabatan:          row.Jabatan,
+		JenisKelamin:     row.JenisKelamin,
+		TanggalLahir:     row.TanggalLahir,
+		TempatLahir:      row.TempatLahir,
+		NoKTP:            row.NoKTP,
+		Alamat:           row.Alamat,
+		NoTelepon:        row.NoTelepon,
+		Agama:            row.Agama,
+		StatusPernikahan: row.StatusPernikahan,
+		Kebangsaan:       row.Kebangsaan,
+		WorkStartDate:    row.WorkStartDate,
+		PhotoURL:         row.PhotoURL,
+		KTPPhotoURL:      row.KTPPhotoURL,
 	}, nil
 }
 
