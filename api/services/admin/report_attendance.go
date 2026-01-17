@@ -74,14 +74,15 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 		return nil, responses.BadRequest(fmt.Errorf("date_to must be on or after date_from"))
 	}
 
-	// Normalize to date-only boundaries in local time, keeping the same
-	// calendar days that the caller provided.
-	loc := time.Local
+	// Normalize to date-only boundaries in Asia/Jakarta, keeping the same
+	// calendar days that the caller provided, karena seluruh reporting
+	// dan dashboard dikomunikasikan dalam WIB.
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		loc = time.FixedZone("WIB", 7*60*60)
+	}
 	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, loc)
 	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, loc)
-	nowLocal := time.Now().In(loc)
-	today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc)
-
 	zero.Info().
 		Str("Context", "buildAttendanceReportData").
 		Time("param_start", startDate).
@@ -128,7 +129,8 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 			if t2, err2 := time.Parse(time.RFC3339, r.Date); err2 == nil {
 				dayDate = t2.In(loc)
 			} else {
-				dayDate = today
+				// Fallback defensively to the report's start date if parsing fails.
+				dayDate = start
 			}
 		}
 		// Normalize any time-of-day component to midnight local time so that
@@ -156,7 +158,9 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 			Present:   r.Present,
 			Late:      r.Late,
 		}
-		if dayDate.After(today) {
+		// Gunakan flag is_future dari DB (berbasis CURDATE() / WIB) agar
+		// klasifikasi "Upcoming" konsisten dengan dashboard utama.
+		if r.IsFuture {
 			row.Absent = 0
 			row.NotYet = r.Scheduled
 		} else {
@@ -279,7 +283,13 @@ func (s *Service) buildAttendanceUserStats(ctx context.Context, start, end time.
 		}
 	}
 
-	today := time.Now().Truncate(24 * time.Hour)
+	// Gunakan tanggal hari ini di timezone Asia/Jakarta, konsisten dengan
+	// dashboard utama.
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	today := time.Now().In(wib).Truncate(24 * time.Hour)
 
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 		attRows, err := s.repo.ListDailyAttendance(ctx, d)

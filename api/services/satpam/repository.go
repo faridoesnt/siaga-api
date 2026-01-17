@@ -272,17 +272,25 @@ func (r *repository) GetOpenAttendanceForUpdate(ctx context.Context, tx *sqlx.Tx
 }
 
 func (r *repository) GetPrimaryAttendanceSpot(ctx context.Context, userID int64) (*entities.AttendanceSpot, error) {
+	// Gunakan tanggal hari ini di timezone Asia/Jakarta agar penentuan
+	// keaktifan spot konsisten dengan seluruh modul lain.
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var spot entities.AttendanceSpot
-	err := r.app.Ds.ReaderDB.GetContext(ctx, &spot, `
+	err = r.app.Ds.ReaderDB.GetContext(ctx, &spot, `
 		SELECT s.id, s.name, s.latitude, s.longitude, s.radius_meters, s.created_at, s.updated_at
 		FROM user_attendance_spots uas
 		INNER JOIN attendance_spots s ON s.id = uas.attendance_spot_id
 		WHERE uas.user_id = ?
-		  AND uas.active_from <= CURDATE()
-		  AND (uas.active_until IS NULL OR uas.active_until >= CURDATE())
+		  AND uas.active_from <= ?
+		  AND (uas.active_until IS NULL OR uas.active_until >= ?)
 		ORDER BY uas.active_from DESC, uas.id DESC
 		LIMIT 1
-	`, userID)
+	`, userID, todayStr, todayStr)
 	if err != nil {
 		if sqlxErrNoRows(err) {
 			return nil, nil
@@ -293,16 +301,22 @@ func (r *repository) GetPrimaryAttendanceSpot(ctx context.Context, userID int64)
 }
 
 func (r *repository) GetActiveAttendanceSpots(ctx context.Context, userID int64) ([]*entities.AttendanceSpot, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var spots []*entities.AttendanceSpot
-	err := r.app.Ds.ReaderDB.SelectContext(ctx, &spots, `
+	err = r.app.Ds.ReaderDB.SelectContext(ctx, &spots, `
 		SELECT s.id, s.name, s.latitude, s.longitude, s.radius_meters, s.created_at, s.updated_at
 		FROM user_attendance_spots uas
 		INNER JOIN attendance_spots s ON s.id = uas.attendance_spot_id
 		WHERE uas.user_id = ?
-		  AND uas.active_from <= CURDATE()
-		  AND (uas.active_until IS NULL OR uas.active_until >= CURDATE())
+		  AND uas.active_from <= ?
+		  AND (uas.active_until IS NULL OR uas.active_until >= ?)
 		ORDER BY uas.active_from DESC, uas.id DESC
-	`, userID)
+	`, userID, todayStr, todayStr)
 	if err != nil {
 		return nil, err
 	}

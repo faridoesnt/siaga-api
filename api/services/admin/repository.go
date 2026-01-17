@@ -1057,6 +1057,14 @@ func (r *repository) ListUserShifts(ctx context.Context, date *time.Time, limit,
 // Dashboard queries
 
 func (r *repository) GetDashboardSummary(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardSummary, error) {
+	// Gunakan "hari ini" dalam timezone Asia/Jakarta supaya seluruh
+	// perhitungan past / future konsisten dengan tampilan dashboard.
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var row entities.AdminDashboardSummary
 	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
 		SELECT
@@ -1078,16 +1086,16 @@ func (r *repository) GetDashboardSummary(ctx context.Context, startDate, endDate
 				ELSE 0 END
 			), 0) AS total_late_minutes,
 			COALESCE(SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END), 0) AS late_records,
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() THEN 1 ELSE 0 END), 0) AS past_scheduled_days,
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS past_present_days,
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.clock_in_status = 'ON_TIME' THEN 1 ELSE 0 END), 0) AS past_on_time_days
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? THEN 1 ELSE 0 END), 0) AS past_scheduled_days,
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? AND a.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS past_present_days,
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? AND a.clock_in_status = 'ON_TIME' THEN 1 ELSE 0 END), 0) AS past_on_time_days
 		FROM user_shifts us
 		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
 		LEFT JOIN attendance a
 			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
 		WHERE us.shift_date BETWEEN ? AND ?
-	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+	`, todayStr, todayStr, todayStr, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
 		if err == sql.ErrNoRows {
 			return &entities.AdminDashboardSummary{}, nil
 		}
@@ -1097,13 +1105,20 @@ func (r *repository) GetDashboardSummary(ctx context.Context, startDate, endDate
 }
 
 func (r *repository) GetDashboardTrend(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardTrendRow, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var rows []*entities.AdminDashboardTrendRow
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
 		SELECT
 			us.shift_date AS shift_date,
 			COUNT(us.id) AS scheduled,
 			COUNT(a.id) AS present,
-			SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END) AS late
+			SUM(CASE WHEN a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END) AS late,
+			CASE WHEN us.shift_date > ? THEN 1 ELSE 0 END AS is_future
 		FROM user_shifts us
 		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
@@ -1112,19 +1127,25 @@ func (r *repository) GetDashboardTrend(ctx context.Context, startDate, endDate t
 		WHERE us.shift_date BETWEEN ? AND ?
 		GROUP BY us.shift_date
 		ORDER BY us.shift_date ASC
-	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+	`, todayStr, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
 func (r *repository) GetDashboardDiscipline(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardDisciplineRow, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var row entities.AdminDashboardDisciplineRow
 	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
 		SELECT
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END), 0) AS late,
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? AND a.clock_in_status IN ('LATE','TOO_LATE') THEN 1 ELSE 0 END), 0) AS late,
 			COALESCE(SUM(
-				CASE WHEN us.shift_date <= CURDATE()
+				CASE WHEN us.shift_date <= ?
 					AND a.clock_out_time IS NOT NULL AND a.clock_in_time IS NOT NULL
 					AND (
 						CASE
@@ -1136,16 +1157,16 @@ func (r *repository) GetDashboardDiscipline(ctx context.Context, startDate, endD
 					) > a.clock_out_time
 				THEN 1 ELSE 0 END
 			), 0) AS early_leave,
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NOT NULL AND a.clock_in_time IS NULL THEN 1 ELSE 0 END), 0) AS no_checkin,
-			COALESCE(SUM(CASE WHEN us.shift_date <= CURDATE() AND a.id IS NULL THEN 1 ELSE 0 END), 0) AS missed_shift,
-			COALESCE(SUM(CASE WHEN us.shift_date > CURDATE() THEN 1 ELSE 0 END), 0) AS future_scheduled
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? AND a.id IS NOT NULL AND a.clock_in_time IS NULL THEN 1 ELSE 0 END), 0) AS no_checkin,
+			COALESCE(SUM(CASE WHEN us.shift_date <= ? AND a.id IS NULL THEN 1 ELSE 0 END), 0) AS missed_shift,
+			COALESCE(SUM(CASE WHEN us.shift_date > ? THEN 1 ELSE 0 END), 0) AS future_scheduled
 		FROM user_shifts us
 		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
 		LEFT JOIN attendance a
 			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
 		WHERE us.shift_date BETWEEN ? AND ?
-	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+	`, todayStr, todayStr, todayStr, todayStr, todayStr, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
 		if err == sql.ErrNoRows {
 			return &entities.AdminDashboardDisciplineRow{}, nil
 		}
@@ -1155,8 +1176,14 @@ func (r *repository) GetDashboardDiscipline(ctx context.Context, startDate, endD
 }
 
 func (r *repository) GetDashboardRiskEmployees(ctx context.Context, startDate, endDate time.Time, limit int) ([]*entities.AdminDashboardRiskRow, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var rows []*entities.AdminDashboardRiskRow
-	args := []interface{}{startDate.Format("2006-01-02"), endDate.Format("2006-01-02")}
+	args := []interface{}{startDate.Format("2006-01-02"), endDate.Format("2006-01-02"), todayStr}
 	query := `
 		SELECT
 			u.id AS user_id,
@@ -1172,7 +1199,7 @@ func (r *repository) GetDashboardRiskEmployees(ctx context.Context, startDate, e
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
 		LEFT JOIN attendance a
 			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
-		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= CURDATE()
+		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= ?
 		GROUP BY u.id, u.name
 		HAVING late_count > 0 OR absent_count > 0 OR no_checkin_count > 0 OR missed_shift_count > 0
 		ORDER BY (late_count * 2 + absent_count * 5 + no_checkin_count * 4 + missed_shift_count * 3) DESC
@@ -1188,6 +1215,12 @@ func (r *repository) GetDashboardRiskEmployees(ctx context.Context, startDate, e
 }
 
 func (r *repository) GetDashboardConsistency(ctx context.Context, startDate, endDate time.Time) ([]*entities.AdminDashboardConsistencyRow, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var rows []*entities.AdminDashboardConsistencyRow
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
 		SELECT
@@ -1199,15 +1232,21 @@ func (r *repository) GetDashboardConsistency(ctx context.Context, startDate, end
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
 		LEFT JOIN attendance a
 			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
-		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= CURDATE()
+		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= ?
 		GROUP BY us.user_id
-	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"), todayStr); err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
 func (r *repository) GetDashboardAudit(ctx context.Context, startDate, endDate time.Time) (*entities.AdminDashboardAuditRow, error) {
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	todayStr := time.Now().In(wib).Format("2006-01-02")
+
 	var row entities.AdminDashboardAuditRow
 	if err := r.app.Ds.ReaderDB.GetContext(ctx, &row, `
 		SELECT
@@ -1219,8 +1258,8 @@ func (r *repository) GetDashboardAudit(ctx context.Context, startDate, endDate t
 			), 0) AS complete_records,
 			COALESCE(COUNT(*), 0) AS total_records
 		FROM attendance
-		WHERE attendance_date BETWEEN ? AND ? AND attendance_date <= CURDATE()
-	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02")); err != nil {
+		WHERE attendance_date BETWEEN ? AND ? AND attendance_date <= ?
+	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"), todayStr); err != nil {
 		if err == sql.ErrNoRows {
 			return &entities.AdminDashboardAuditRow{}, nil
 		}

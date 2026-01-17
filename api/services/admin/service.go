@@ -942,26 +942,14 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 		resp.Summary.AvgLateMinutes = summaryRow.TotalLateMin / float64(summaryRow.LateRecords)
 	}
 
-	// Trend (satu bulan penuh, dengan label Belum Absen untuk shift di masa depan).
-	today := time.Now().Truncate(24 * time.Hour)
 	for _, r := range trendRows {
 		resp.AttendanceTrend.Labels = append(resp.AttendanceTrend.Labels, r.Date)
 		resp.AttendanceTrend.Present = append(resp.AttendanceTrend.Present, r.Present)
 		resp.AttendanceTrend.Late = append(resp.AttendanceTrend.Late, r.Late)
 
-		// Parse tanggal dari label; dukung format "2006-01-02" dan RFC3339.
-		dayDate, err := time.ParseInLocation("2006-01-02", r.Date, today.Location())
-		if err != nil {
-			if t2, err2 := time.Parse(time.RFC3339, r.Date); err2 == nil {
-				dayDate = t2
-			} else {
-				dayDate = today
-			}
-		}
-		dayDate = dayDate.Truncate(24 * time.Hour)
-
-		isFuture := dayDate.After(today)
-		if isFuture {
+		// Delegasikan penentuan "future" ke database via kolom is_future
+		// yang berbasis CURDATE() di timezone DB (WIB).
+		if r.IsFuture {
 			resp.AttendanceTrend.Absent = append(resp.AttendanceTrend.Absent, 0)
 			resp.AttendanceTrend.BelumAbsen = append(resp.AttendanceTrend.BelumAbsen, r.Scheduled)
 		} else {
@@ -2535,9 +2523,13 @@ func (s *Service) ExportAttendanceMonitoringToExcel(ctx context.Context, startDa
 		return nil, responses.BadRequest(errors.New("end_date must be >= start_date"))
 	}
 
-	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, startDate.Location())
-	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, endDate.Location())
-	today := time.Now().Truncate(24 * time.Hour)
+	wib, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		wib = time.FixedZone("WIB", 7*60*60)
+	}
+	start := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), 0, 0, 0, 0, wib)
+	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, wib)
+	today := time.Now().In(wib).Truncate(24 * time.Hour)
 
 	users, err := s.repo.ListSatpam(ctx, nil, 0, 0)
 	if err != nil {

@@ -20,6 +20,7 @@ type AdminDashboardTrendRow struct {
 	Scheduled int    `db:"scheduled"`
 	Present   int    `db:"present"`
 	Late      int    `db:"late"`
+	IsFuture  bool   `db:"is_future"`
 }
 
 type AdminDashboardDisciplineRow struct {
