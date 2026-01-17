@@ -402,8 +402,17 @@ func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, i
 			endStr := userShiftForOpen.Shift.EndTime
 			startStr := userShiftForOpen.Shift.StartTime
 
-			endT, errEnd := time.Parse("15:04:05", endStr)
-			startT, errStart := time.Parse("15:04:05", startStr)
+			// Support both "HH:MM:SS" and "HH:MM" formats that may come
+			// from shift configuration.
+			parseTime := func(s string) (time.Time, error) {
+				if t, err := time.Parse("15:04:05", s); err == nil {
+					return t, nil
+				}
+				return time.Parse("15:04", s)
+			}
+
+			endT, errEnd := parseTime(endStr)
+			startT, errStart := parseTime(startStr)
 			if errEnd == nil {
 				// Default: clock-out di tanggal openDate.
 				endDate := openDate
