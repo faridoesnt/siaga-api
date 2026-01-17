@@ -390,17 +390,18 @@ func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, i
 			spotID = *openAtt.AttendanceSpotID
 		}
 
-		// Tentukan waktu clock-out otomatis memakai jam akhir shift pada
-		// tanggal attendance yang bersangkutan, agar durasi kerja tetap
-		// wajar dan tidak melompat hingga hari ini.
+		// Tentukan waktu clock-out otomatis memakai jam akhir shift dari
+		// attendance yang bersangkutan (berdasarkan shift_id pada record
+		// attendance), agar durasi kerja tetap wajar dan tidak melompat
+		// hingga hari ini.
 		clockOutTime := now
-		userShiftForOpen, err := s.repo.GetUserShiftForDate(ctx, userID, openDate)
+		shiftForOpen, err := s.repo.GetShiftByID(ctx, openAtt.ShiftID)
 		if err != nil {
 			return nil, responses.InternalServerError(err)
 		}
-		if userShiftForOpen != nil {
-			endStr := userShiftForOpen.Shift.EndTime
-			startStr := userShiftForOpen.Shift.StartTime
+		if shiftForOpen != nil {
+			endStr := shiftForOpen.EndTime
+			startStr := shiftForOpen.StartTime
 
 			// Support both "HH:MM:SS" and "HH:MM" formats that may come
 			// from shift configuration.

@@ -15,6 +15,7 @@ import (
 type Repository interface {
 	GetUserByID(ctx context.Context, id int64) (*entities.User, error)
 	GetUserShiftForDate(ctx context.Context, userID int64, date time.Time) (*entities.UserShiftWithShift, error)
+	GetShiftByID(ctx context.Context, id int64) (*entities.Shift, error)
 	GetAttendanceForDate(ctx context.Context, userID int64, date time.Time) (*entities.Attendance, error)
 	GetAttendanceForUpdate(ctx context.Context, tx *sqlx.Tx, userID int64, date time.Time) (*entities.Attendance, error)
 	GetOpenAttendance(ctx context.Context, userID int64) (*entities.Attendance, error)
@@ -147,6 +148,23 @@ func (r *repository) GetUserShiftForDate(ctx context.Context, userID int64, date
 		UserShift: us,
 		Shift:     shift,
 	}, nil
+}
+
+func (r *repository) GetShiftByID(ctx context.Context, id int64) (*entities.Shift, error) {
+	var shift entities.Shift
+	err := r.app.Ds.ReaderDB.GetContext(ctx, &shift, `
+		SELECT id, name, start_time, end_time, late_tolerance_minute, created_at, updated_at
+		FROM shifts
+		WHERE id = ?
+		LIMIT 1
+	`, id)
+	if err != nil {
+		if sqlxErrNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &shift, nil
 }
 
 func (r *repository) GetAttendanceForDate(ctx context.Context, userID int64, date time.Time) (*entities.Attendance, error) {
