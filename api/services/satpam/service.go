@@ -75,6 +75,7 @@ func (s *Service) GetMe(ctx context.Context, userID int64) (*entities.User, erro
 
 func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time) (*entities.SatpamDashboard, error) {
 	dateOnly := date.Truncate(24 * time.Hour)
+	today := nowInWIB().Truncate(24 * time.Hour)
 
 	userShift, err := s.repo.GetUserShiftForDate(ctx, userID, dateOnly)
 	if err != nil {
@@ -131,7 +132,15 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
-	hasOpen := openAtt != nil
+	hasOpen := false
+	if openAtt != nil {
+		openDate := openAtt.AttendanceDate.Truncate(24 * time.Hour)
+		// Hanya menganggap "open" jika masih untuk hari ini; open attendance di
+		// hari-hari sebelumnya akan otomatis di-close saat clock-in berikutnya.
+		if openDate.Equal(today) {
+			hasOpen = true
+		}
+	}
 
 	canClockIn := false
 	canClockOut := false
@@ -156,7 +165,7 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time
 	}
 
 	var openSummary *entities.SatpamDashboardAttendance
-	if openAtt != nil {
+	if hasOpen && openAtt != nil {
 		openSummary = &entities.SatpamDashboardAttendance{
 			Status:       entities.AttendanceStatusClockedIn,
 			ClockInTime:  openAtt.ClockInTime,
@@ -266,15 +275,6 @@ func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, i
 	now := nowInWIB()
 	dateOnly := now.Truncate(24 * time.Hour)
 
-	// RULE 1: block if there is any open attendance
-	openAtt, err := s.repo.GetOpenAttendance(ctx, userID)
-	if err != nil {
-		return nil, responses.InternalServerError(err)
-	}
-	if openAtt != nil {
-		return nil, responses.Conflict(errors.New("Masih ada absensi yang belum clock-out. Silakan clock-out terlebih dahulu."))
-	}
-
 	// ensure user has shift
 	userShift, err := s.repo.GetUserShiftForDate(ctx, userID, dateOnly)
 	if err != nil {
@@ -366,6 +366,64 @@ func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, i
 	defer func() {
 		_ = tx.Rollback()
 	}()
+
+	// Jika masih ada attendance terbuka dari hari-hari sebelumnya, auto
+	// clock-out menggunakan waktu dan lokasi saat ini sebelum membuat
+	// attendance baru untuk hari ini.
+	openAtt, err := s.repo.GetOpenAttendanceForUpdate(ctx, tx, userID)
+	if err != nil {
+		return nil, responses.InternalServerError(err)
+	}
+	if openAtt != nil {
+		openDate := openAtt.AttendanceDate.Truncate(24 * time.Hour)
+		if openDate.Equal(dateOnly) {
+			// Masih ada absensi terbuka untuk hari ini => tetap blokir.
+			return nil, responses.Conflict(errors.New("Masih ada absensi hari ini yang belum clock-out. Silakan clock-out terlebih dahulu."))
+		}
+		// Auto close absensi terbuka di hari sebelumnya.
+		// Gunakan spot yang sama dengan saat clock-in jika tersedia, agar
+		// tidak tercatat seolah-olah clock-out di spot lain.
+		spotID := chosenSpot.ID
+		if openAtt.ClockInSpotID != nil {
+			spotID = *openAtt.ClockInSpotID
+		} else if openAtt.AttendanceSpotID != nil {
+			spotID = *openAtt.AttendanceSpotID
+		}
+
+		// Tentukan waktu clock-out otomatis memakai jam akhir shift pada
+		// tanggal attendance yang bersangkutan, agar durasi kerja tetap
+		// wajar dan tidak melompat hingga hari ini.
+		clockOutTime := now
+		userShiftForOpen, err := s.repo.GetUserShiftForDate(ctx, userID, openDate)
+		if err != nil {
+			return nil, responses.InternalServerError(err)
+		}
+		if userShiftForOpen != nil {
+			endStr := userShiftForOpen.Shift.EndTime
+			startStr := userShiftForOpen.Shift.StartTime
+
+			endT, errEnd := time.Parse("15:04:05", endStr)
+			startT, errStart := time.Parse("15:04:05", startStr)
+			if errEnd == nil {
+				// Default: clock-out di tanggal openDate.
+				endDate := openDate
+				// Jika shift lintas hari (end < start), anggap selesai di hari
+				// berikutnya.
+				if errStart == nil && endT.Before(startT) {
+					endDate = openDate.AddDate(0, 0, 1)
+				}
+				clockOutTime = time.Date(
+					endDate.Year(), endDate.Month(), endDate.Day(),
+					endT.Hour(), endT.Minute(), endT.Second(),
+					0, now.Location(),
+				)
+			}
+		}
+
+		if err := s.repo.UpdateAttendanceClockOut(ctx, tx, openAtt.ID, clockOutTime, lat, lng, nil, spotID); err != nil {
+			return nil, responses.InternalServerError(err)
+		}
+	}
 
 	att := &entities.Attendance{
 		UserID:           userID,
