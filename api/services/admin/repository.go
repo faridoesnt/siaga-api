@@ -1225,15 +1225,18 @@ func (r *repository) GetDashboardConsistency(ctx context.Context, startDate, end
 	if err := r.app.Ds.ReaderDB.SelectContext(ctx, &rows, `
 		SELECT
 			us.user_id AS user_id,
+			u.name AS user_name,
+			COALESCE(p.jabatan, 'Satpam') AS position,
 			COUNT(us.id) AS scheduled,
 			COUNT(a.id) AS present
 		FROM user_shifts us
 		INNER JOIN users u ON u.id = us.user_id AND u.role = 'SATPAM'
+		LEFT JOIN satpam_profiles p ON p.user_id = u.id
 		INNER JOIN shifts s ON s.id = us.shift_id AND s.name <> 'Libur'
 		LEFT JOIN attendance a
 			ON a.user_id = us.user_id AND a.attendance_date = us.shift_date AND a.shift_id = us.shift_id
 		WHERE us.shift_date BETWEEN ? AND ? AND us.shift_date <= ?
-		GROUP BY us.user_id
+		GROUP BY us.user_id, u.name, p.jabatan
 	`, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"), todayStr); err != nil {
 		return nil, err
 	}

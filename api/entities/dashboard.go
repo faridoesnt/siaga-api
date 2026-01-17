@@ -42,9 +42,11 @@ type AdminDashboardRiskRow struct {
 }
 
 type AdminDashboardConsistencyRow struct {
-	UserID    int64 `db:"user_id"`
-	Scheduled int   `db:"scheduled"`
-	Present   int   `db:"present"`
+	UserID    int64  `db:"user_id"`
+	UserName  string `db:"user_name"`
+	Position  string `db:"position"`
+	Scheduled int    `db:"scheduled"`
+	Present   int    `db:"present"`
 }
 
 type AdminDashboardAuditRow struct {
@@ -65,6 +67,17 @@ type AdminDashboardKPI struct {
 	Delta  float64 `json:"delta"`
 	Trend  string  `json:"trend"`  // up | down | flat
 	Status string  `json:"status"` // good | warning | bad
+}
+
+type AdminDashboardGuardSummaryRow struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Position  string  `json:"position"`
+	Scheduled int     `json:"scheduled"`
+	Present   int     `json:"present"`
+	Absent    int     `json:"absent"`
+	Late      int     `json:"late"`
+	RiskScore float64 `json:"risk_score"`
 }
 
 type AdminDashboardResponse struct {
@@ -113,5 +126,6 @@ type AdminDashboardResponse struct {
 
 	// Insight & KPI view models for dashboard
 	// HeroInsight AdminDashboardHeroInsight `json:"hero_insight"`
-	KPIs        []AdminDashboardKPI       `json:"kpis"`
+	KPIs         []AdminDashboardKPI           `json:"kpis"`
+	GuardSummary []AdminDashboardGuardSummaryRow `json:"guard_summary"`
 }

@@ -900,7 +900,7 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 		return nil, responses.InternalServerError(err)
 	}
 
-	riskRows, err := s.repo.GetDashboardRiskEmployees(ctx, start, end, 10)
+	riskRows, err := s.repo.GetDashboardRiskEmployees(ctx, start, end, 0)
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
@@ -969,8 +969,18 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 	resp.DisciplineBreakdown.MissedShift = discRow.MissedShift
 	resp.DisciplineBreakdown.BelumAbsen = discRow.FutureShift
 
-	// Risk employees
+	// Index risk rows by user for later guard summary.
+	riskByUser := make(map[int64]*entities.AdminDashboardRiskRow, len(riskRows))
 	for _, r := range riskRows {
+		riskByUser[r.UserID] = r
+	}
+
+	// Risk employees (top N by score)
+	const topRiskLimit = 10
+	for idx, r := range riskRows {
+		if idx >= topRiskLimit {
+			break
+		}
 		absent := r.AbsentCount
 		// Simplified risk score: fokus ke late, absent, dan missed shift.
 		riskScore := float64(r.LateCount*2 + absent*5 + r.MissedShiftCount*3)
@@ -1001,7 +1011,46 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 		})
 	}
 
-	// Attendance consistency
+	// Guard-level summary for all satpam yang memiliki scheduling
+	for _, c := range consRows {
+		if c.Scheduled == 0 {
+			continue
+		}
+		absent := c.Scheduled - c.Present
+		if absent < 0 {
+			absent = 0
+		}
+		late := 0
+		missed := 0
+		if r, ok := riskByUser[c.UserID]; ok {
+			late = r.LateCount
+			missed = r.MissedShiftCount
+		}
+		riskScore := float64(late*2 + absent*5 + missed*3)
+
+		resp.GuardSummary = append(resp.GuardSummary, entities.AdminDashboardGuardSummaryRow{
+			ID:        fmt.Sprintf("%d", c.UserID),
+			Name:      c.UserName,
+			Position:  c.Position,
+			Scheduled: c.Scheduled,
+			Present:   c.Present,
+			Absent:    absent,
+			Late:      late,
+			RiskScore: riskScore,
+		})
+	}
+
+	// Sort guard summary by risk score desc, then name asc.
+	if len(resp.GuardSummary) > 0 {
+		sort.Slice(resp.GuardSummary, func(i, j int) bool {
+			if resp.GuardSummary[i].RiskScore == resp.GuardSummary[j].RiskScore {
+				return resp.GuardSummary[i].Name < resp.GuardSummary[j].Name
+			}
+			return resp.GuardSummary[i].RiskScore > resp.GuardSummary[j].RiskScore
+		})
+	}
+
+	// Attendance consistency (aggregate counts)
 	totalUsers := 0
 	consistent := 0
 	var totalStreak float64
