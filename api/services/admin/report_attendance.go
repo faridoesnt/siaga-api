@@ -60,6 +60,10 @@ type attendanceUserStats struct {
 	Absent          int
 	LateCount       int
 	TotalLateMinute int
+	// HasData menandai apakah user ini pernah memiliki jadwal/attendance
+	// pada rentang tanggal laporan. Jika tidak, user tidak akan muncul
+	// di Attendance List.
+	HasData bool
 }
 
 // buildAttendanceReportData prepares the data model used by both XLSX and PDF
@@ -208,9 +212,17 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 	// Build final user rows (including risk classification).
 	var userRows []attendanceReportUserRow
 	for _, st := range statsByUser {
+		// Hanya sertakan satpam yang benar-benar punya scheduling/attendance
+		// di rentang tanggal yang dipilih.
+		if !st.HasData {
+			continue
+		}
+
 		var score float64
 		if r, ok := riskByUser[st.UserID]; ok {
-			score = float64(r.LateCount*2 + r.AbsentCount*5 + r.NoCheckinCount*4 + r.MissedShiftCount*3)
+			// Sejajarkan dengan perhitungan risk di dashboard: tanpa faktor
+			// no_checkin yang secara praktis tidak digunakan.
+			score = float64(r.LateCount*2 + r.AbsentCount*5 + r.MissedShiftCount*3)
 		}
 		level := "Low"
 		if score >= 20 {
@@ -311,6 +323,9 @@ func (s *Service) buildAttendanceUserStats(ctx context.Context, start, end time.
 				// Not scheduled in this date range.
 				continue
 			}
+
+			// Pada titik ini user punya jadwal atau attendance pada hari ini.
+			stat.HasData = true
 
 			// Any scheduled shift (non-Libur filtering is already handled by
 			// dashboard queries; here we mirror attendance monitoring export).

@@ -189,7 +189,8 @@ func (s *Service) GenerateAttendanceReportPDF(ctx context.Context, startDate, en
 
 	// Attendance list section (top N rows to keep within 1–2 pages).
 	addSectionHeader(pdf, "Attendance List (Top by Risk)")
-	const maxUsers = 15
+	// maxUsers=0 => tampilkan semua satpam yang memiliki scheduling
+	const maxUsers = 0
 	renderAttendanceListTable(pdf, data.UserRows, maxUsers)
 
 	// Footer on each page

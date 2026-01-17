@@ -954,17 +954,14 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 	// Risk employees
 	for _, r := range riskRows {
 		absent := r.AbsentCount
-		riskScore := float64(r.LateCount*2 + absent*5 + r.NoCheckinCount*4 + r.MissedShiftCount*3)
+		// Simplified risk score: fokus ke late, absent, dan missed shift.
+		riskScore := float64(r.LateCount*2 + absent*5 + r.MissedShiftCount*3)
 		// Determine dominant factor (use codes; FE handles human-readable text).
 		maxVal := r.LateCount
 		reason := "LATE"
 		if absent > maxVal {
 			maxVal = absent
 			reason = "ABSENT"
-		}
-		if r.NoCheckinCount > maxVal {
-			maxVal = r.NoCheckinCount
-			reason = "NO_CHECKIN"
 		}
 		if r.MissedShiftCount > maxVal {
 			maxVal = r.MissedShiftCount
