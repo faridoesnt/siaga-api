@@ -1011,30 +1011,31 @@ func (s *Service) GetDashboard(ctx context.Context, month time.Time) (*entities.
 		})
 	}
 
-	// Guard-level summary for all satpam yang memiliki scheduling
-	for _, c := range consRows {
-		if c.Scheduled == 0 {
+	// Guard-level summary untuk semua satpam yang memiliki scheduling/attendance
+	statsByUser, err := s.buildAttendanceUserStats(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	for _, st := range statsByUser {
+		if !st.HasData {
 			continue
-		}
-		absent := c.Scheduled - c.Present
-		if absent < 0 {
-			absent = 0
 		}
 		late := 0
 		missed := 0
-		if r, ok := riskByUser[c.UserID]; ok {
+		if r, ok := riskByUser[st.UserID]; ok {
 			late = r.LateCount
 			missed = r.MissedShiftCount
 		}
-		riskScore := float64(late*2 + absent*5 + missed*3)
+		riskScore := float64(late*2 + st.Absent*5 + missed*3)
 
 		resp.GuardSummary = append(resp.GuardSummary, entities.AdminDashboardGuardSummaryRow{
-			ID:        fmt.Sprintf("%d", c.UserID),
-			Name:      c.UserName,
-			Position:  c.Position,
-			Scheduled: c.Scheduled,
-			Present:   c.Present,
-			Absent:    absent,
+			ID:        fmt.Sprintf("%d", st.UserID),
+			Name:      st.Name,
+			Position:  st.Position,
+			Scheduled: st.Scheduled,
+			Present:   st.Present,
+			Absent:    st.Absent,
+			Upcoming:  st.Upcoming,
 			Late:      late,
 			RiskScore: riskScore,
 		})

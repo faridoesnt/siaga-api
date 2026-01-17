@@ -269,19 +269,80 @@ func renderTrendTable(pdf *gofpdf.Fpdf, trend []attendanceReportTrendRow) {
 		return
 	}
 
-	headers := []string{"Date", "Present", "Late", "Absent", "Upcoming"}
-	rows := make([][]string, 0, len(trend))
+	left, _, right, _ := pdf.GetMargins()
+	pageWidth, pageHeight := pdf.GetPageSize()
+	footerMargin := 10.0
+	contentBottom := pageHeight - footerMargin - 2.0
+
+	autoBreak, autoMargin := pdf.GetAutoPageBreak()
+	pdf.SetAutoPageBreak(false, autoMargin)
+	defer pdf.SetAutoPageBreak(autoBreak, autoMargin)
+
+	headers := []string{"Date", "Scheduled", "Present", "Late", "Absent", "Upcoming"}
+
+	// Buat kolom dengan lebar merata sehingga tabel memenuhi lebar area konten.
+	contentWidth := pageWidth - left - right
+	colCount := len(headers)
+	colWidth := contentWidth / float64(colCount)
+	cols := make([]tableCol, colCount)
+	for i := range cols {
+		align := "C"
+		if i == 0 {
+			align = "L"
+		}
+		cols[i] = tableCol{
+			Width: colWidth,
+			Align: align,
+		}
+	}
+
+	// Center table within content width.
+	totalWidth := 0.0
+	for _, c := range cols {
+		totalWidth += c.Width
+	}
+	startX := left
+	if totalWidth < contentWidth {
+		startX = left + (contentWidth-totalWidth)/2
+	}
+
+	drawHeader := func() {
+		pdf.SetX(startX)
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetFillColor(229, 231, 235)
+		pdf.SetDrawColor(209, 213, 219)
+		drawTableRow(pdf, cols, headers, true)
+	}
+
+	// First header
+	drawHeader()
+
+	pdf.SetFont("Helvetica", "", 9)
+	fill := false
+
 	for _, t := range trend {
-		rows = append(rows, []string{
+		values := []string{
 			t.Date.Format("2006-01-02"),
+			fmt.Sprintf("%d", t.Scheduled),
 			fmt.Sprintf("%d", t.Present),
 			fmt.Sprintf("%d", t.Late),
 			fmt.Sprintf("%d", t.Absent),
 			fmt.Sprintf("%d", t.NotYet),
-		})
-	}
+		}
 
-	renderSimpleTable(pdf, headers, rows)
+		rowHeight := calcRowHeight(pdf, cols, values)
+		if rowHeight == 0 {
+			continue
+		}
+		if pdf.GetY()+rowHeight > contentBottom {
+			pdf.AddPage()
+			drawHeader()
+			pdf.SetFont("Helvetica", "", 9)
+		}
+
+		drawTableRow(pdf, cols, values, fill)
+		fill = !fill
+	}
 }
 
 // tableCol describes a column in a PDF table.
@@ -363,8 +424,8 @@ func drawTableRow(pdf *gofpdf.Fpdf, cols []tableCol, values []string, fill bool)
 
 // renderAttendanceListTable renders the top N risk employees in a clean table.
 func renderAttendanceListTable(pdf *gofpdf.Fpdf, rows []attendanceReportUserRow, maxRows int) {
-	left, _, _, _ := pdf.GetMargins()
-	_, pageHeight := pdf.GetPageSize()
+	left, _, right, _ := pdf.GetMargins()
+	pageWidth, pageHeight := pdf.GetPageSize()
 	// Reserve a bit of space above the footer (which is drawn at ~pageHeight-10)
 	footerMargin := 10.0
 	contentBottom := pageHeight - footerMargin - 2.0
@@ -374,22 +435,35 @@ func renderAttendanceListTable(pdf *gofpdf.Fpdf, rows []attendanceReportUserRow,
 	pdf.SetAutoPageBreak(false, autoMargin)
 	defer pdf.SetAutoPageBreak(autoBreak, autoMargin)
 
-	pdf.SetX(left)
-
 	cols := []tableCol{
-		{Width: 55, Align: "L"}, // Name
-		{Width: 30, Align: "L"}, // Position
-		{Width: 15, Align: "C"}, // Present
-		{Width: 15, Align: "C"}, // Absent
-		{Width: 15, Align: "C"}, // Late
-		{Width: 25, Align: "C"}, // Avg late
-		{Width: 25, Align: "L"}, // Risk
+		{Width: 38, Align: "L"}, // Name
+		{Width: 22, Align: "L"}, // Position
+		{Width: 16, Align: "C"}, // Scheduled
+		{Width: 16, Align: "C"}, // Present
+		{Width: 16, Align: "C"}, // Absent
+		{Width: 16, Align: "C"}, // Upcoming
+		{Width: 14, Align: "C"}, // Late
+		{Width: 19, Align: "C"}, // Avg late
+		{Width: 19, Align: "L"}, // Risk
 	}
 
-	headers := []string{"Name", "Position", "Present", "Absent", "Late", "Avg late (min)", "Risk"}
+	// Hitung posisi X agar tabel terpusat di area konten (di antara margin kiri/kanan).
+	totalWidth := 0.0
+	for _, c := range cols {
+		totalWidth += c.Width
+	}
+	contentWidth := pageWidth - left - right
+	startX := left
+	if totalWidth < contentWidth {
+		startX = left + (contentWidth-totalWidth)/2
+	}
+
+	pdf.SetX(startX)
+
+	headers := []string{"Name", "Position", "Scheduled", "Present", "Absent", "Upcoming", "Late", "Avg late (min)", "Risk"}
 
 	drawHeader := func() {
-		pdf.SetX(left)
+		pdf.SetX(startX)
 		pdf.SetFont("Helvetica", "B", 10)
 		pdf.SetFillColor(229, 231, 235)
 		pdf.SetDrawColor(209, 213, 219)
@@ -409,17 +483,24 @@ func renderAttendanceListTable(pdf *gofpdf.Fpdf, rows []attendanceReportUserRow,
 	}
 
 	if limit == 0 {
-		drawTableRow(pdf, cols, []string{"No data", "", "", "", "", "", ""}, false)
+		drawTableRow(pdf, cols, []string{"No data", "", "", "", "", "", "", "", ""}, false)
 		return
 	}
 
 	for i := 0; i < limit; i++ {
 		u := rows[i]
+		scheduled := u.ScheduledCount
+		if scheduled == 0 {
+			// Fallback defensif jika belum di-set.
+			scheduled = u.PresentCount + u.AbsentCount + u.UpcomingCount
+		}
 		values := []string{
 			u.Name,
 			u.Position,
+			fmt.Sprintf("%d", scheduled),
 			fmt.Sprintf("%d", u.PresentCount),
 			fmt.Sprintf("%d", u.AbsentCount),
+			fmt.Sprintf("%d", u.UpcomingCount),
 			fmt.Sprintf("%d", u.LateCount),
 			fmt.Sprintf("%.1f", u.AvgLateMinutes),
 			fmt.Sprintf("%s (%.0f)", u.RiskLevel, u.RiskScore),

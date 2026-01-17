@@ -76,6 +76,7 @@ type AdminDashboardGuardSummaryRow struct {
 	Scheduled int     `json:"scheduled"`
 	Present   int     `json:"present"`
 	Absent    int     `json:"absent"`
+	Upcoming  int     `json:"upcoming"`
 	Late      int     `json:"late"`
 	RiskScore float64 `json:"risk_score"`
 }

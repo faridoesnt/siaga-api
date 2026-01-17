@@ -37,6 +37,8 @@ type attendanceReportUserRow struct {
 	UserID          int64
 	Name            string
 	Position        string
+	ScheduledCount  int
+	UpcomingCount   int
 	PresentCount    int
 	AbsentCount     int
 	LateCount       int
@@ -56,8 +58,10 @@ type attendanceUserStats struct {
 	UserID          int64
 	Name            string
 	Position        string
+	Scheduled       int
 	Present         int
 	Absent          int
+	Upcoming        int
 	LateCount       int
 	TotalLateMinute int
 	// HasData menandai apakah user ini pernah memiliki jadwal/attendance
@@ -238,10 +242,13 @@ func (s *Service) buildAttendanceReportData(ctx context.Context, startDate, endD
 		if st.LateCount > 0 && st.TotalLateMinute > 0 {
 			avgLate = float64(st.TotalLateMinute) / float64(st.LateCount)
 		}
+		scheduled := st.Scheduled
 		userRows = append(userRows, attendanceReportUserRow{
 			UserID:         st.UserID,
 			Name:           st.Name,
 			Position:       st.Position,
+			ScheduledCount: scheduled,
+			UpcomingCount:  st.Upcoming,
 			PresentCount:   st.Present,
 			AbsentCount:    st.Absent,
 			LateCount:      st.LateCount,
@@ -311,6 +318,11 @@ func (s *Service) buildAttendanceUserStats(ctx context.Context, start, end time.
 		}
 		shiftByUser := make(map[int64]shiftInfo)
 		for _, r := range shiftRows {
+			// Selaraskan dengan dashboard: abaikan shift "Libur" saat
+			// menghitung scheduled / absent.
+			if r.ShiftName == "Libur" {
+				continue
+			}
 			shiftByUser[r.UserID] = shiftInfo{
 				Name:  r.ShiftName,
 				Start: r.StartTime,
@@ -327,7 +339,7 @@ func (s *Service) buildAttendanceUserStats(ctx context.Context, start, end time.
 
 			stat := statsByUser[u.ID]
 			attendance := attByUser[u.ID]
-			info, hasShift := shiftByUser[u.ID]
+			_, hasShift := shiftByUser[u.ID]
 
 			if !hasShift && attendance == nil {
 				// Not scheduled in this date range.
@@ -337,16 +349,13 @@ func (s *Service) buildAttendanceUserStats(ctx context.Context, start, end time.
 			// Pada titik ini user punya jadwal atau attendance pada hari ini.
 			stat.HasData = true
 
-			// Any scheduled shift (non-Libur filtering is already handled by
-			// dashboard queries; here we mirror attendance monitoring export).
-			stat.Absent += 0
-			stat.Present += 0
-
 			if hasShift {
-				// Count as scheduled for this day.
-				// (We don't store scheduled separately; absent = scheduled - present
-				// is approximated via days where we mark absent below.)
-				_ = info.Name
+				// Count as scheduled for this day (shift non-Libur).
+				stat.Scheduled++
+				// Jika tanggal di depan hari ini, hitung sebagai upcoming.
+				if d.After(today) {
+					stat.Upcoming++
+				}
 			}
 
 			if attendance != nil {
