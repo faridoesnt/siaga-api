@@ -134,15 +134,18 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time
 	}
 	hasOpen := openAtt != nil
 	hasOpenToday := false
+	hasOpenBeforeToday := false
 	if openAtt != nil {
 		openDate := openAtt.AttendanceDate.Truncate(24 * time.Hour)
 		if openAtt.ClockInTime != nil {
 			openDate = openAtt.ClockInTime.In(wibLocation).Truncate(24 * time.Hour)
 		}
 		// Hanya menganggap "open" jika masih untuk hari ini; open attendance di
-		// hari-hari sebelumnya akan otomatis di-close saat clock-in berikutnya.
 		if openDate.Equal(today) {
 			hasOpenToday = true
+		} else if openDate.Before(today) {
+			// Open attendance dari hari sebelumnya.
+			hasOpenBeforeToday = true
 		}
 	}
 
@@ -151,6 +154,13 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time
 
 	if hasOpenToday {
 		canClockIn = false
+		canClockOut = true
+	} else if hasOpenBeforeToday {
+		// Masih ada attendance terbuka dari hari sebelumnya:
+		// - izinkan CLOCK OUT untuk menutup shift kemarin secara manual
+		// - izinkan CLOCK IN; saat dipakai, backend akan auto clock-out
+		//   shift kemarin menggunakan jam akhir shift.
+		canClockIn = true
 		canClockOut = true
 	} else {
 		// Tidak ada attendance lain yang masih terbuka.
