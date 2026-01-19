@@ -375,7 +375,13 @@ func (s *Service) ClockIn(ctx context.Context, userID int64, lat, lng float64, i
 		return nil, responses.InternalServerError(err)
 	}
 	if openAtt != nil {
+		// Gunakan tanggal berdasarkan waktu clock-in sebenarnya agar tidak
+		// terjadi pergeseran hari karena perbedaan timezone antara kolom
+		// attendance_date dan clock_in_time.
 		openDate := openAtt.AttendanceDate.Truncate(24 * time.Hour)
+		if openAtt.ClockInTime != nil {
+			openDate = openAtt.ClockInTime.In(wibLocation).Truncate(24 * time.Hour)
+		}
 		if openDate.Equal(dateOnly) {
 			// Masih ada absensi terbuka untuk hari ini => tetap blokir.
 			return nil, responses.Conflict(errors.New("Masih ada absensi hari ini yang belum clock-out. Silakan clock-out terlebih dahulu."))
