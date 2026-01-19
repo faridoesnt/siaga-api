@@ -132,27 +132,35 @@ func (s *Service) GetDashboard(ctx context.Context, userID int64, date time.Time
 	if err != nil {
 		return nil, responses.InternalServerError(err)
 	}
-	hasOpen := false
+	hasOpen := openAtt != nil
+	hasOpenToday := false
 	if openAtt != nil {
 		openDate := openAtt.AttendanceDate.Truncate(24 * time.Hour)
+		if openAtt.ClockInTime != nil {
+			openDate = openAtt.ClockInTime.In(wibLocation).Truncate(24 * time.Hour)
+		}
 		// Hanya menganggap "open" jika masih untuk hari ini; open attendance di
 		// hari-hari sebelumnya akan otomatis di-close saat clock-in berikutnya.
 		if openDate.Equal(today) {
-			hasOpen = true
+			hasOpenToday = true
 		}
 	}
 
 	canClockIn := false
 	canClockOut := false
 
-	if hasOpen {
+	if hasOpenToday {
 		canClockIn = false
 		canClockOut = true
 	} else {
-		// Tidak ada attendance yang masih terbuka.
-		// Jika hari ini sudah lengkap clock-in & clock-out untuk shift hari ini,
-		// maka tidak perlu mengizinkan clock-in lagi.
-		if attendance != nil && attendance.ClockInTime != nil && attendance.ClockOutTime != nil {
+		// Tidak ada attendance lain yang masih terbuka.
+		// Jika untuk tanggal ini sudah ada attendance dengan clock-in namun
+		// belum clock-out, izinkan clock-out.
+		if attendance != nil && attendance.ClockInTime != nil && attendance.ClockOutTime == nil {
+			canClockIn = false
+			canClockOut = true
+		} else if attendance != nil && attendance.ClockInTime != nil && attendance.ClockOutTime != nil {
+			// Sudah lengkap clock-in & clock-out untuk shift hari ini.
 			canClockIn = false
 			canClockOut = false
 		} else {
